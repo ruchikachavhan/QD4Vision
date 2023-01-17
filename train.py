@@ -323,37 +323,37 @@ def main_worker(gpu, ngpus_per_node, args):
         train_avg_sim, train_acc1, train_acc5, train_loss = train(train_loader, models_ensemble, criterion, optimizer, scaler, epoch, args, running_mean, coeff)
         test_acc1, test_acc5, val_loss, val_avg_sim = evaluate(val_loader, models_ensemble, criterion, epoch, args)
 
-        # print("Training Accuracies of all backbones", train_acc1, train_acc5)
-        # print("Test Accuracies of all backbones", test_acc1, test_acc5)
+        print("Training Accuracies of all backbones", train_acc1, train_acc5)
+        print("Test Accuracies of all backbones", test_acc1, test_acc5)
         print("Train sim", train_avg_sim)
         print("Val sim", val_avg_sim, coeff)
-        # diff = get_pairwise_rowdiff(train_avg_sim).item()
-        # quality.append(test_acc1.mean().item())
-        # diversity.append(diff)
-        # dict = {"Q": quality, "D": diversity}
-        # with open(args.train_data + args.arch + "_" +  '_log_qd.json', "w") as f:
-        #     json.dump(dict, f)
+        diff = get_pairwise_rowdiff(train_avg_sim).item()
+        quality.append(test_acc1.mean().item())
+        diversity.append(diff)
+        dict = {"Q": quality, "D": diversity}
+        with open(args.train_data + args.arch + "_" +  '_log_qd.json', "w") as f:
+            json.dump(dict, f)
         
-        # np.save(args.arch + "_" +  args.train_data+ "_l2_similarity_matrix_"+ str(args.num_augs)+ "augs.npy", train_avg_sim.detach().cpu().numpy())
-        # np.save("mahalanobis_" + args.train_data+ "_l2_similarity_matrix_"+ str(args.num_augs)+ "augs.npy", avg_sim.detach().cpu().numpy())
+        np.save('train' + "_" +  args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "augs.npy", train_avg_sim.detach().cpu().numpy())
+        np.save("val" + "_" + args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "augs.npy", val_avg_sim.detach().cpu().numpy())
         # early_stopping(train_loss, val_loss)
         # if early_stopping.early_stop:
         #     print("We are at epoch:", epoch)
         #     break
         # else:
-        #     if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-        #             and args.rank == 0): # only the first GPU saves checkpoint
-                
-        #         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-        #             and args.rank == 0): # only the first GPU saves checkpoint
-        #             print("Saving checkpoint in", os.path.join(args.output_dir, fname % args.epochs))
-        #             save_checkpoint({
-        #                 'epoch': epoch + 1,
-        #                 'arch': args.arch,
-        #                 'state_dict': models_ensemble.state_dict(),
-        #                 'optimizer' : optimizer.state_dict(),
-        #                 'scaler': scaler.state_dict(),
-        #             }, is_best=False, filename=os.path.join(args.output_dir, fname % args.epochs))
+        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+                and args.rank == 0): # only the first GPU saves checkpoint
+            
+            if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+                and args.rank == 0): # only the first GPU saves checkpoint
+                print("Saving checkpoint in", os.path.join(args.output_dir, fname % args.epochs))
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': models_ensemble.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                    'scaler': scaler.state_dict(),
+                }, is_best=False, filename=os.path.join(args.output_dir, fname % args.epochs))
 
 
 if __name__ == '__main__':
