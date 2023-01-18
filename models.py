@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 import math
 
 class BranchedResNet(nn.Module):
-    def __init__(self, N, arch, num_classes, stop_grad = True, pretrained=True):
+    def __init__(self, N, arch, num_classes, stop_grad = False, pretrained=True):
         super(BranchedResNet, self).__init__()
         if arch == 'resnet50':
             self.base_model = resnet50(pretrained = pretrained)

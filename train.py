@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import torchvision
 import models
+import adapter_models
 import datasets
 from pretrain_utils import train, evaluate, save_checkpoint, RunningStats, adjust_coeff, adjust_learning_rate, get_pairwise_rowdiff, EarlyStopping
 import json
@@ -86,7 +87,7 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training')
 parser.add_argument('--num_encoders', default=5, type=int, help='Number of encoders')
 parser.add_argument('--num_augs', default=6, type=int, help='Number of encoders')
-parser.add_argument('--coeff', default=0.5, type=float, help='')
+parser.add_argument('--coeff', default=0.2, type=float, help='')
 parser.add_argument('--warmup-epochs', default=10, type=int, metavar='N',
                     help='number of warmup epochs')
 parser.add_argument('--baseline', action='store_true',
@@ -117,8 +118,7 @@ def main():
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node =  4
-    # torch.cuda.device_count()
+    ngpus_per_node =  torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -164,11 +164,14 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.train_data == 'imagenet1k':
         args.num_classes = 1000
 
-    if args.arch == 'resnet50':
-        models_ensemble = models.BranchedResNet(N = args.num_encoders, num_classes = args.num_classes, arch = args.arch)
-    elif args.arch == 'convnext':
-        models_ensemble = models.DiverseConvNext(N = args.num_encoders, num_classes = args.num_classes)
-
+    if args.model_type == 'branch':
+        if args.arch == 'resnet50':
+            models_ensemble = models.BranchedResNet(N = args.num_encoders, num_classes = args.num_classes, arch = args.arch)
+        elif args.arch == 'convnext':
+            models_ensemble = models.DiverseConvNext(N = args.num_encoders, num_classes = args.num_classes)
+    elif args.model_type == 'adapters':
+        models_ensemble = adapter_models.ResNet50(num_classes = args.num_classes, num_tasks=args.num_encoders)
+        
     # optionally resume from a checkpoint, only for ensemble model
     if args.resume:
         if os.path.isfile(args.resume):
