@@ -105,13 +105,20 @@ def train(train_loader, models_ensemble, criterion, optimizer, scaler, epoch, ar
 
     models_ensemble.train()
     end = time.time()
-    
     avg_sim = 0.0
     iters_per_epoch = len(train_loader)
     acc1_list, acc5_list = np.zeros(args.num_encoders), np.zeros(args.num_encoders)
-    for iter, (images, labels) in enumerate(train_loader):
-        lr = adjust_learning_rate(optimizer, epoch + iter / iters_per_epoch, args)
+
+    iters_per_epoch = len(train_loader)
+    if epoch > args.warmup_epochs:
+        lr = adjust_learning_rate(optimizer, epoch, args, args.lr)
+        args.lr = lr
         learning_rates.update(lr)
+    for iter, (images, labels) in enumerate(train_loader):
+        if epoch < args.warmup_epochs:
+            lr = adjust_learning_rate(optimizer, epoch + iter / iters_per_epoch, args, args.lr)
+            learning_rates.update(lr)
+
         data_time.update(time.time() - end)
         if args.gpu is not None:
             images = images.reshape(-1, 3, datasets.img_size, datasets.img_size).cuda(args.gpu, non_blocking=True) 
@@ -183,8 +190,6 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
     orig_feats_list = []
     all_feats_list = [[] for _ in range(args.num_augs)]
     for iter, (images, labels) in enumerate(val_loader):
-
-
         data_time.update(time.time() - end)
         if args.gpu is not None:
             images = images.reshape(-1, 3, datasets.img_size, datasets.img_size).cuda(args.gpu, non_blocking=True) 
@@ -478,12 +483,14 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
-def adjust_learning_rate(optimizer, epoch, args):
+def adjust_learning_rate(optimizer, epoch, args, prev_lr, linear_gamma = 0.16, decay_gamma = 0.1):
     """Decays the learning rate with half-cycle cosine after warmup"""
     if epoch < args.warmup_epochs:
+        # lr = prev_lr + linear_gamma
         lr = args.lr * epoch / args.warmup_epochs 
     else:
-        lr = args.lr * 0.5 * (1. + math.cos(math.pi * (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)))
+        lr = prev_lr * decay_gamma
+        # lr = args.lr * 0.5 * (1. + math.cos(math.pi * (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     return lr

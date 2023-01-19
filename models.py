@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 import math
 
 class BranchedResNet(nn.Module):
-    def __init__(self, N, arch, num_classes, stop_grad = False, pretrained=True):
+    def __init__(self, N, arch, num_classes, stop_grad = True, pretrained=True):
         super(BranchedResNet, self).__init__()
         if arch == 'resnet50':
             self.base_model = resnet50(pretrained = pretrained)
@@ -31,7 +31,7 @@ class BranchedResNet(nn.Module):
                 if 'layer4' not in name and 'fc' not in name:
                     param.requires_grad = False
 
-    def forward(self, x):
+    def forward(self, x, reshape = True):
         x = self.base_model.conv1(x)
         x = self.base_model.bn1(x)
         x = self.base_model.act1(x)
@@ -42,8 +42,9 @@ class BranchedResNet(nn.Module):
         feats = [self.base_model.global_pool(self.base_model.branches_layer4[i](x)) for i in range(self.N)]
         outputs = [self.base_model.branches_fc[i](feats[i]) for i in range(self.N)]
 
-        outputs = torch.cat(outputs).reshape(self.N, -1, self.num_classes)
-        feats = torch.cat(feats).reshape(self.N, -1, self.num_feat)
+        if reshape:
+            outputs = torch.cat(outputs).reshape(self.N, -1, self.num_classes)
+            feats = torch.cat(feats).reshape(self.N, -1, self.num_feat)
 
         return outputs, feats
 

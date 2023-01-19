@@ -1,0 +1,10 @@
+wandb_version: 1
+
+batch_size:
+  value: 41
+lr:
+  value: 0.00874589879148796
+optimizer:
+  value: sgd
+weight_decay:
+  value: 2.173086607050095e-06

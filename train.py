@@ -28,6 +28,7 @@ import adapter_models
 import datasets
 from pretrain_utils import train, evaluate, save_checkpoint, RunningStats, adjust_coeff, adjust_learning_rate, get_pairwise_rowdiff, EarlyStopping
 import json
+from torch_ema import ExponentialMovingAverage
 
 # python train.py --multiprocessing-distributed --rank 0 --world-size 1 --dist-url "tcp://localhost:10001" --train_data imagenet --num_augs 6
 # Models and arguments
@@ -47,7 +48,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                         ' (default: resnet50)')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
-parser.add_argument('--output_dir', default = '/raid/s2265822/qd4vision/saved_models/good_models1', type=str)
+parser.add_argument('--output_dir', default = '/raid/s2265822/saved_models/qd4vision/', type=str)
 parser.add_argument('--epochs', default=20, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
@@ -57,17 +58,19 @@ parser.add_argument('-b', '--batch-size', default=512, type=int,
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on all nodes when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--lr', '--learning-rate', default=0.0003, type=float,
+parser.add_argument('--lr', '--learning-rate', default=1.0, type=float,
                     metavar='LR', help='initial (base) learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
-parser.add_argument('--wd', '--weight-decay', default=0.0008, type=float,
+parser.add_argument('--wd', '--weight-decay', default=8e-5, type=float,
                     metavar='W', help='weight decay (default: 1e-6)',
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
+parser.add_argument('--model_type', default='branch', type=str, 
+                    help='which model type to use')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
@@ -98,6 +101,7 @@ parser.add_argument('--train_data', default='imagenet',
 
 def main():
     args = parser.parse_args()
+    print(args)
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -192,18 +196,20 @@ def main_worker(gpu, ngpus_per_node, args):
                 # delete renamed or unused k
                 del state_dict[k]
 
-            print(state_dict.keys())
-            models_ensemble.load_state_dict(checkpoint['state_dict'], strict=False)
+            
+            models_ensemble.load_state_dict(checkpoint['state_dict'], strict=False)            
+            args.lr = checkpoint['optimizer']['param_groups'][0]['lr']
+            print("Previous learning rate", args.lr)
             # optimizer.load_state_dict(checkpoint['optimizer'])
             # scaler.load_state_dict(checkpoint['scaler'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
-        
-    
-    # infer learning rate before changing batch size
-    args.lr = args.lr * args.batch_size / 256
+    else:
+        args.start_epoch = 0
+        # infer learning rate before changing batch size
+        args.lr = args.lr * args.batch_size / 256
 
     # Run DDP only for ensemble model
     if not torch.cuda.is_available():
@@ -238,12 +244,13 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         # AllGather/rank implementation in this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
-    print(models_ensemble) # print model after SyncBatchNorm
+    # print(models_ensemble) # print model after SyncBatchNorm
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    optimizer = torch.optim.AdamW(models_ensemble.parameters(), args.lr,
-                                weight_decay=args.weight_decay)    
+    
+    optimizer = torch.optim.SGD(models_ensemble.parameters(), lr = args.lr, weight_decay=args.weight_decay, nesterov=True, momentum=0.9)
     scaler = torch.cuda.amp.GradScaler()
+    # ema = ExponentialMovingAverage(models_ensemble.parameters(), decay=0.9999)
 
     # Data Loading code
     if args.num_augs == 2:
@@ -316,7 +323,7 @@ def main_worker(gpu, ngpus_per_node, args):
     diversity = []
     best_loss = 0.0
     early_stopping = EarlyStopping(tolerance=5, min_delta=5)
-    for epoch in range(0, args.epochs):
+    for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         
@@ -356,6 +363,7 @@ def main_worker(gpu, ngpus_per_node, args):
                     'state_dict': models_ensemble.state_dict(),
                     'optimizer' : optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
+                    # 'ema': ema.state_dict(),
                 }, is_best=False, filename=os.path.join(args.output_dir, fname % args.epochs))
 
 

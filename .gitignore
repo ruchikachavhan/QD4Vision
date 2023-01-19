@@ -1,0 +1,17 @@
+*.png
+*.jpg
+*.json
+*.csv
+*.jpeg
+*.pyc
+*.txt
+*.pkl
+*.xml
+.DS_Store
+*.zip
+own_scripts/
+*.bmp
+*.tar.gz
+*.ipynb
+*.out
+*.pt
