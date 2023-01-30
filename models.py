@@ -30,6 +30,7 @@ class BranchedResNet(nn.Module):
             for name, param in self.base_model.named_parameters():
                 if 'layer4' not in name and 'fc' not in name:
                     param.requires_grad = False
+                print(name, param.requires_grad)
 
     def forward(self, x, reshape = True):
         x = self.base_model.conv1(x)

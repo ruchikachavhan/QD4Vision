@@ -173,8 +173,8 @@ class FacesInTheWild300W(Dataset):
         keypoints = list(sorted(keypoints))
 
         split_path = os.path.join(self.root, f'{mode}_{split}.npy')
-        while not os.path.exists(split_path):
-            self.generate_dataset_splits(len(images), shots=shots)
+        # while not os.path.exists(split_path):
+        self.generate_dataset_splits(len(images), shots=shots)
         split_idxs = np.load(split_path)
         print(split, split_path, max(split_idxs), len(images), len(keypoints))
         self.images = [images[i] for i in split_idxs-1]
@@ -186,18 +186,10 @@ class FacesInTheWild300W(Dataset):
         assert sum(split_sizes) == 1
         idxs = np.arange(l)
         np.random.shuffle(idxs)
-        if shots is None:
-            split1, split2 = int(l * split_sizes[0]), int(l * sum(split_sizes[:2]))
-            train_idx = idxs[:split1]
-            valid_idx = idxs[split1:split2]
-            test_idx = idxs[split2:]
-        else:
-            split1, split2 = int(l * split_sizes[0]), int(l * sum(split_sizes[:2]))
-            print("fs", shots, split2, split1)
-            shot_split = int(l * shots)
-            train_idx = idxs[:shot_split//2]
-            valid_idx = idxs[shot_split//2:shot_split]
-            test_idx = idxs[shot_split:]
+        split1, split2 = int(l * split_sizes[0]), int(l * sum(split_sizes[:2]))
+        train_idx = idxs[:split1]
+        valid_idx = idxs[split1:split2]
+        test_idx = idxs[split2:]
         #print(max(train_idx), max(valid_idx), max(test_idx))
         print("Generated train")
         np.save(os.path.join(self.root, f'{self.mode}_train'), train_idx)

@@ -9,9 +9,15 @@
 *.xml
 .DS_Store
 *.zip
-own_scripts/
 *.bmp
 *.tar.gz
 *.ipynb
 *.out
 *.pt
+*.json
+*.npy
+mmsegmentation/
+downstream_results/
+features/
+__pycache__
+wandb/

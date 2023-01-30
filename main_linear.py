@@ -30,10 +30,11 @@ from  downstream_utils import get_dataset, get_train_transform, get_val_transfor
 import wandb
 from downstream_utils import *
 from sklearn.linear_model import LogisticRegression as LogReg
-
-clf = LogReg(solver='lbfgs', multi_class='multinomial', warm_start=True)
-print("CLF", clf)
-
+from sklearn.linear_model import Ridge as LinReg
+from sklearn.metrics import confusion_matrix, precision_recall_curve
+from sklearn.utils._testing import ignore_warnings
+from sklearn.exceptions import ConvergenceWarning
+from tqdm import tqdm
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -116,24 +117,7 @@ parser.add_argument('--few_shot_reg', default=None, type=float,
 parser.add_argument('-sc', '--num-samples-per-classes', default=None, type=int,
                         help='number of samples per classes.')
 
-sweep_config = {
-                'method': 'random',
-                'metric': {'goal': 'minimize', 'name': 'val_loss'},
-                'parameters': {
-                    'lr': {'distribution': 'uniform',
-                                      'max': 0.5,
-                                      'min': 0},
-                    'weight_decay': {'distribution': 'uniform',
-                                      'max': 0.001,
-                                      'min': 0}
-                    }
- }
-
 def main():
-
-    sweep_id = wandb.sweep(sweep_config, project="Downstream")
-
-    wandb.agent(sweep_id, function = main_worker, count = 10)
     main_worker()
 
 def main_worker(config=None):
@@ -196,6 +180,8 @@ def main_worker(config=None):
     if args.baseline:
         if args.arch == 'resnet50':
             models_ensemble.feat_dim = 2048 if args.arch == 'resnet50' else 512
+            # if dataset_info[args.test_dataset]['mode'] == 'pose_estimation':
+                # models_ensemble.global_pool = nn.Identity()
             models_ensemble.fc = nn.Identity()
         elif args.arch == 'convnext':
             models_ensemble.head.fc = nn.Identity()
@@ -203,6 +189,8 @@ def main_worker(config=None):
         if args.arch == 'resnet50':
             feat_dim = 2048 if args.arch == 'resnet50' else 512
             models_ensemble.base_model.branches_fc = nn.ModuleList([nn.Identity() for i in range(args.num_encoders)])
+            # if dataset_info[args.test_dataset]['mode'] == 'pose_estimation':
+                # models_ensemble.base_model.global_pool = nn.Identity()
         elif args.arch == 'convnext':
             for ind in range(args.num_encoders):
                 models_ensemble.base_model.head[ind].fc = nn.Identity()
@@ -222,71 +210,157 @@ def main_worker(config=None):
     # infer learning rate before changing batch size, not done in hyoer-models
     init_lr = args.lr 
     models_ensemble = models_ensemble.cuda(args.gpu)
-
-    # print(models_ensemble)
-    # i=0
-    # if i == 0:
-    with wandb.init(project='Downstream', name = args.test_dataset+"_downstream", entity='my-team-ruch', config = config):
-        config = wandb.config
         
-        train_images, train_labels, val_images, val_labels, test_images, test_labels, num_classes = get_feature_datasets(args, models_ensemble)
-        print("Dataset sizes", train_images.shape[0], val_images.shape[0], test_images.shape[0])
+    # train_images, train_labels, val_images, val_labels, test_images, test_labels, num_classes =
+    train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets(args, models_ensemble)
+    # print("Dataset sizes", train_images.shape[0], val_images.shape[0], test_images.shape[0])
 
-        if dataset_info[args.test_dataset]['mode'] == 'classification':
-            criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    # train_images, train_labels, val_images, val_labels, test_images, test_labels = train_images.cpu(), train_labels.cpu(), val_images.cpu(), val_labels.cpu(), test_images.cpu(), test_labels.cpu()
+
+    X_train_feature, y_train, X_val_feature, y_val = get_features(
+        train_loader, val_loader, models_ensemble, device = args.gpu, baseline = args.baseline, test=False
+    )
+
+    print(X_train_feature.shape, X_val_feature.shape)
+
+    X_trainval_feature, y_trainval, X_test_feature, y_test = get_features(
+            trainval_loader, test_loader, models_ensemble, device = args.gpu, baseline = args.baseline, test=False
+        )
+
+    if args.baseline:
+        if dataset_info[args.test_dataset]['mode'] == 'regression':
+            clf = LinearRegression(2048, num_classes, 'r2')
+        elif dataset_info[args.test_dataset]['mode'] == 'pose_estimation':
+            clf = LinearRegression(2048, num_classes, 'pca')
         else:
-            criterion = nn.L1Loss().cuda(args.gpu)
-
-        if args.baseline:
-            classifier = nn.Linear(models_ensemble.feat_dim, num_classes).cuda(args.gpu)
+            clf = LogisticRegression(2048, num_classes, 'accuracy')
+    else:
+        if dataset_info[args.test_dataset]['mode'] == 'regression':
+            clf = [LinearRegression(2048, num_classes, 'r2') for _ in range(args.num_encoders)]
+        elif dataset_info[args.test_dataset]['mode'] == 'pose_estimation':
+            clf = [LinearRegression(2048, num_classes, 'pca') for _ in range(args.num_encoders)]
         else:
-            classifier = nn.ModuleList([nn.Linear(models_ensemble.num_feat, num_classes).cuda(args.gpu) for _ in range(args.num_encoders)])
-            classifier.train()
-        
-        optimizer = torch.optim.LBFGS(list(classifier.parameters()), lr = config.lr, max_iter = 10)
-        
-        # , weight_decay = config.weight_decay,  momentum=0.9)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[100, 200, 300, 400], gamma=0.1, last_epoch=- 1, verbose=False)
+            clf = [LogisticRegression(2048, num_classes, 'accuracy') for _ in range(args.num_encoders)]
 
-        wandb.watch(classifier, criterion, log="all")
+    if dataset_info[args.test_dataset]['mode'] in ['regression', 'pose_estimation']:
+        wd_range = torch.logspace(-2, 3, 45)
+    else:
+        wd_range = torch.logspace(-6, 5, 45)
+
+    for wd in tqdm(wd_range, desc='Selecting best hyperparameters'):
         if args.baseline:
-            results_path = open(os.path.join("features", 'baseline', args.arch + "_"+ args.test_dataset+ ".txt"), 'w')
-        else:        
-            results_path = open(os.path.join("features", args.arch + "_"+ args.test_dataset+ ".txt"), 'w')
+            if dataset_info[args.test_dataset]['mode'] in ['regression', 'pose_estimation']:
+                C = wd.item()
+                clf.set_params({'alpha': C})
+            else:
+                C = 1. / wd.item()
+                clf.set_params({'C': C})
+            val_acc = clf.fit_regression(X_train_feature, y_train, X_val_feature, y_val)
+            test_acc = clf.fit_regression(X_trainval_feature, y_trainval, X_test_feature, y_test)
+        else:
+            for k in range(args.num_encoders):
+                if dataset_info[args.test_dataset]['mode'] in ['regression', 'pose_estimation']:
+                    C = wd.item()
+                    clf[k].set_params({'alpha': C})
+                else:
+                    C = 1. / wd.item()
+                    clf[k].set_params({'C': C})
+            val_acc = [clf[k].fit_regression(X_train_feature[k], y_train, X_val_feature[k], y_val) for k in range(args.num_encoders)]
+            test_acc = [clf[k].fit_regression(X_trainval_feature[k], y_trainval, X_test_feature[k], y_test) for k in range(args.num_encoders)]
+        print(C, val_acc, test_acc)
 
-        for epoch in range(0, args.epochs):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            # epoch_results = {}
-            train_loss, train_acc, _ = train_fc(train_images, train_labels, classifier, optimizer, criterion, args, len(train_images), epoch, train_mode = True)
-            end.record()
-            # Waits for everything to finish running
-            torch.cuda.synchronize()
-            time = start.elapsed_time(end)
-            # print("Time for training", start.elapsed_time(end))
-            # print(" --- Validation ----")
-            val_loss, val_acc, lstsq_weights = train_fc(val_images, val_labels, classifier, optimizer, criterion, args, len(val_images), epoch, train_mode = False)
-            test_loss, test_acc = test(epoch, test_images, test_labels, classifier, lstsq_weights, criterion, args)
+# Testing classes and functions
+def get_features(train_loader, test_loader, model, device, baseline, test=True):
+    X_train_feature, y_train = inference(train_loader, model, device, baseline, 'train')
+    X_test_feature, y_test = inference(test_loader, model, device, baseline, 'test' if test else 'val')
+    return X_train_feature, y_train, X_test_feature, y_test
 
-            print("Epoch: %.2i Training loss: %.4f Training accuracy: %.4f Val loss: %.4f Val accuracy: %.4f Test loss: %.4f Test accuracy: %.4f"
-                             % (epoch, train_loss, train_acc, val_loss, val_acc, test_loss, test_acc))
-            
-            results_str = "Epoch: %.2i Training loss: %.4f Training accuracy: %.4f Val loss: %.4f Val accuracy: %.4f Test loss: %.4f Test accuracy: %.4f" % (epoch, train_loss, train_acc, val_loss, val_acc, test_loss, test_acc)
-            results_path.write(results_str)
-            results_path.write("\n")
+def inference(loader, model, device, baseline, split):
+    model.eval()
+    feature_vector = []
+    labels_vector = []
+    for data in tqdm(loader, desc=f'Computing features for {split} set'):
+        batch_x, batch_y = data
+        batch_x = batch_x.cuda(device)
+        labels_vector.extend(np.array(batch_y))
+        if baseline:
+            features = model(batch_x).view(batch_x.shape[0], -1)
+            feature_vector.extend(features.detach().cpu().numpy())
+        else:
+            _, features = model(batch_x, reshape = False)
 
-            if not args.baseline:
-                print("----------LSTSQ Search-----------")
-                print("Weights:", lstsq_weights)
-                print("Loss:", val_loss)
-                print("Accuracies:", val_acc)
+            features = torch.cat(features).reshape(model.N, -1, 2048)
+            feature_vector.append(features)
 
-            wandb.log({'epoch': epoch, 'train_loss': train_loss, "train_accuracy": train_acc, "val_loss": val_loss, "val_acc": val_acc, "test_loss": test_loss, "test_acc": test_acc})
-            scheduler.step()
+    if not baseline:
+        feature_vector = torch.cat(feature_vector, dim = 1).cpu().detach().numpy()
+
+    feature_vector = np.array(feature_vector)
+    labels_vector = np.array(labels_vector, dtype=int)
+
+    return feature_vector, labels_vector
+
+class LogisticRegression(nn.Module):
+    def __init__(self, input_dim, num_classes, metric):
+        super().__init__()
+        self.input_dim = input_dim
+        self.num_classes = num_classes
+        self.metric = metric
+        self.clf = LogReg(solver='lbfgs', multi_class='multinomial', warm_start=True)
+
+        print('Logistic regression:')
+        print(f'\t solver = L-BFGS')
+        print(f"\t classes = {self.num_classes}")
+        print(f"\t metric = {self.metric}")
+
+    def set_params(self, d):
+        self.clf.set_params(**d)
+
+    def fit_regression(self, X_train, y_train, X_test, y_test):
+        if self.metric == 'accuracy':
+            self.clf.fit(X_train, y_train)
+            test_acc = 100. * self.clf.score(X_test, y_test)
+            return test_acc
+
+        elif self.metric == 'mean per-class accuracy':
+            self.clf.fit(X_train, y_train)
+            pred_test = self.clf.predict(X_test)
+
+            #Get the confusion matrix
+            cm = confusion_matrix(y_test, pred_test)
+            cm = cm.diagonal() / cm.sum(axis=1) 
+            test_score = 100. * cm.mean()
+
+            return test_score
 
 
+class LinearRegression(nn.Module):
+    def __init__(self, input_dim, output_dim, metric):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.metric = metric
+        self.clf = LinReg(solver='auto')
 
+        print('Linear regression:')
+        print(f'\t solver = AUTO')
+        print(f"\t classes = {self.output_dim}")
+        print(f"\t metric = {self.metric}")
+
+    def set_params(self, d):
+        self.clf.set_params(**d)
+
+    def fit_regression(self, X_train, y_train, X_test, y_test):
+        if self.metric == 'r2':
+            self.clf.fit(X_train, y_train)
+            test_acc = 100. * self.clf.score(X_test, y_test)
+            return test_acc
+
+        elif self.metric == 'pca':
+            self.clf.fit(X_train, y_train)
+            pred_test = self.clf.predict(X_test)
+            test_score = dist_acc((pred_test - y_test)**2)
+            return test_score
 
 if __name__ == '__main__':
     main()
