@@ -16,6 +16,7 @@
 *.pt
 *.json
 *.npy
+*.jpeg
 segmentation.py
 mmsegmentation/
 downstream_results/
