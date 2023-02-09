@@ -16,6 +16,7 @@
 *.pt
 *.json
 *.npy
+segmentation.py
 mmsegmentation/
 downstream_results/
 features/
