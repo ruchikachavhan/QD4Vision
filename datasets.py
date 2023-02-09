@@ -32,7 +32,7 @@ class Edges(object):
         x = x.filter(ImageFilter.FIND_EDGES).convert('RGB')
         return x
 
-img_size = 96
+img_size = 224
 # Normalize
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])

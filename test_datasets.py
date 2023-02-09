@@ -153,7 +153,7 @@ class Flowers(Dataset):
 
 
 class FacesInTheWild300W(Dataset):
-    def __init__(self, root, split, mode='indoor', transform=None, loader=default_loader, download=False, shots = None):
+    def __init__(self, root, split, mode='indoor+outdoor', transform=None, loader=default_loader, download=False, shots = None):
         self.root = root
         self.split = split
         self.mode = mode
@@ -173,8 +173,8 @@ class FacesInTheWild300W(Dataset):
         keypoints = list(sorted(keypoints))
 
         split_path = os.path.join(self.root, f'{mode}_{split}.npy')
-        # while not os.path.exists(split_path):
-        self.generate_dataset_splits(len(images), shots=shots)
+        while not os.path.exists(split_path):
+            self.generate_dataset_splits(len(images), shots=shots)
         split_idxs = np.load(split_path)
         print(split, split_path, max(split_idxs), len(images), len(keypoints))
         self.images = [images[i] for i in split_idxs-1]
@@ -291,7 +291,7 @@ class CelebA(VisionDataset):
             self,
             root: str,
             split: str = "train",
-            target_type: Union[List[str], str] = "attr",
+            target_type: Union[List[str], str] = "landmarks",
             transform: Optional[Callable] = None,
             target_transform: Optional[Callable] = None,
             download: bool = False,
@@ -601,12 +601,13 @@ class Causal3DIdent(ImageFolder):
     # teapot, hare, dragon, cow, armadillo, horse, head
     # latents
     # (obj pos X, Y, Z), (obj rot X, Y, Z), (light angle), (obj hue), (light hue), (bg hue)
-    def __init__(self, root, split, transform, target_type='class'):
+    def __init__(self, root, split, transform, target_type='latents'):
         split_path = os.path.join(root, split + 'set')
+        print("PATH", split_path)
         super().__init__(split_path, transform=transform)
         self.target_type = target_type
         self.num_classes = 7
-        print("PATH", split_path)
+        
         self.latents = np.concatenate([np.load(os.path.join(split_path, f'latents_{i}.npy')) for i in range(self.num_classes)])
 
     def __getitem__(self, i):
@@ -686,13 +687,22 @@ class ALOI(ImageFolder):
             transforms.ToTensor()])
         else:
             self.transform = transform
+        self.label_dict = {'l1c1': 1, 'l1c2': 2, 'l1c3': 3, 
+                    'l2c1': 4, 'l2c2': 5, 'l2c3': 6, 
+                    'l3c1': 7, 'l3c2': 8, 'l3c3': 9,
+                    'l4c1': 10, 'l4c2': 11, 'l4c3': 12,
+                    'l5c1': 13, 'l5c2': 14, 'l5c3': 15,
+                    'l6c1': 16, 'l6c2': 17, 'l6c3': 18,
+                    'l7c1': 19, 'l7c2': 20, 'l7c3': 21,
+                    'l8c1': 22, 'l8c2': 23, 'l8c3': 24,
+                    }
 
     def __getitem__(self, i):
         image = Image.open(self.samples[i])
         image = self.transform(image)
-        regression_label = int(self.samples[i].split("/")[-1].split(".")[0].split("r")[1])
-        regression_label = np.radians(regression_label)
-        return image, regression_label
+        label = self.samples[i].split("/")[-1].split(".")[0].split("_")[1]
+        label = self.label_dict[label] - 1
+        return image, label
 
     def __len__(self):
         return len(self.samples)

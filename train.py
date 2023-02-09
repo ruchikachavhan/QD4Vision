@@ -87,6 +87,7 @@ parser.add_argument('--model_type', default='branch', type=str,
 parser.add_argument('--num_encoders', default=5, type=int, help='Number of encoders')
 parser.add_argument('--num_augs', default=6, type=int, help='Number of encoders')
 parser.add_argument('--coeff', default=0.2, type=float, help='')
+parser.add_argument('--kl_coeff', default=0.1, type=float, help='')
 parser.add_argument('--baseline', action='store_true',
                     help='Use baseline (one backbone) models if true')
 parser.add_argument('--mixup', action='store_true',
@@ -159,7 +160,7 @@ def main():
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node =  torch.cuda.device_count()
+    ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -362,7 +363,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ############################# Data Loading code #############################
     if args.num_augs == 2:
         augs_list = [datasets.dorsal_augmentations, datasets.ventral_augmentations, datasets.base_augs]
-    elif args.num_augs == 5:
+    elif args.num_augs in [4, 5]:
         # TODO: Need to change this to have combinations
         augs_list = datasets.combinations_default
         augs_list.append(datasets.base_augs)
@@ -469,7 +470,7 @@ def main_worker(gpu, ngpus_per_node, args):
     )
 
 
-    fname  = args.arch + "_" + args.train_data+"-supervised"+ str(args.num_augs) +'_checkpoint_warmup_%04d.pth.tar'
+    fname  = args.arch + "_" + args.train_data+"-supervised"+ str(args.num_augs) +'_checkpoint_kl_%04d.pth.tar'
     coeff = args.coeff
 
     quality = []
@@ -491,7 +492,8 @@ def main_worker(gpu, ngpus_per_node, args):
             # Two instances of running stats: first one for mean feature and second one for covariance matrix
             running_mean = [RunningStats() for i in range(0, 2)] 
 
-            train_avg_sim, train_acc1, train_acc5, train_loss = train(train_loader, sup_data_loader, models_ensemble, criterion, optimizer, scaler, model_ema, mixupcutmix, epoch, args, running_mean, coeff)
+            train_avg_sim, train_acc1, train_acc5, train_loss = train(train_loader, sup_data_loader, models_ensemble, criterion, 
+                                optimizer, scaler, model_ema, mixupcutmix, epoch, args, running_mean, coeff, args.kl_coeff)
             lr_scheduler.step()
             test_acc1, test_acc5, val_loss, val_avg_sim = evaluate(val_loader, models_ensemble, criterion, epoch, args)
             if args.model_ema:
@@ -511,8 +513,8 @@ def main_worker(gpu, ngpus_per_node, args):
             with open(args.train_data + args.arch + "_" +  '_log_qd.json', "w") as f:
                 json.dump(dict, f)
             
-            np.save('train' + "_" +  args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "augs.npy", train_avg_sim.detach().cpu().numpy())
-            np.save("val" + "_" + args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "augs.npy", val_avg_sim.detach().cpu().numpy())
+            np.save('train' + "_" +  args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_augs.npy", train_avg_sim.detach().cpu().numpy())
+            np.save("val" + "_" + args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_augs.npy", val_avg_sim.detach().cpu().numpy())
             # early_stopping(train_loss, val_loss)
             # if early_stopping.early_stop:
             #     print("We are at epoch:", epoch)

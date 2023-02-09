@@ -10,42 +10,41 @@ import json
 from test_datasets import CelebA, FacesInTheWild300W, LeedsSportsPose, AnimalPose, Causal3DIdent, ALOI, MPII
 from r2score import r2_score
 import os
+from torch.utils.data.sampler import SubsetRandomSampler
 import numpy as np
+import models
+from torchvision.models import resnet50, ResNet50_Weights
+import torch.nn as nn
+
 
 # dataset_dict = ['ImageList', 'Office31', 'OfficeHome', "VisDA2017", "OfficeCaltech", "DomainNet", "ImageNetR",
 #            "ImageNetSketch", "Aircraft", "cub200", "StanfordCars", "StanfordDogs", "COCO70", "OxfordIIITPets", "PACS",
 #            "DTD", "OxfordFlowers102", "PatchCamelyon", "Retinopathy", "EuroSAT", "Resisc45", "Food101", "SUN397",
 #            "Caltech101", "CIFAR10", "CIFAR100"]
+
+generator = torch.Generator()
+generator.manual_seed(0)
+
 dataset_info = {
-    'imagenet': {
-        'class': datasets.CIFAR10, 'dir': 'CIFAR10', 'num_classes': 100,
-        'splits': ['train', 'train', 'test'], 'split_size': 0.8,
-        'mode': 'classification'
-    },
     'DTD': {
-        'class': None, 'dir': 'dtd', 'num_classes': 47,
+        'class': None, 'dir': 'dtd/', 'num_classes': 47,
         'splits': ['train', 'validation', 'test'], 'split_size': 0.8,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'accuracy'
     },
     'Aircraft': {
-        'class': None, 'dir': 'Aircraft', 'num_classes': 0,
+        'class': None, 'dir': 'Aircraft', 'num_classes': 10,
         'splits': ['train', 'val', 'test'], 'split_size': 0.8,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'mean per-class accuracy'
     },
     'StanfordCars': {
-        'class': None, 'dir': 'StanfordCars', 'num_classes': 397,
+        'class': None, 'dir': 'Cars/', 'num_classes': 397,
         'splits': ['train', 'val', 'test'], 'split_size': 0.8,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'accuracy'
     },
     'OxfordIIITPets': {
-        'class': None, 'dir': 'OxfordIIITPets', 'num_classes': 37,
+        'class': None, 'dir': 'pets/oxford-iiit-pet/', 'num_classes': 37,
         'splits': ['train', 'train', 'test'], 'split_size': 0.8,
-        'mode': 'classification'
-    },
-    'rotation': {
-        'class': None, 'dir': 'CIFAR10', 'num_classes': 25,
-        'splits': ['train', 'val', 'test'], 'split_size': 0.7,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'mean per-class accuracy'
     },
     'cub200': {
         'class': None, 'dir': 'CUB200', 'num_classes': 200,
@@ -55,58 +54,58 @@ dataset_info = {
     'CIFAR10': {
         'class': datasets.CIFAR10, 'dir': 'CIFAR10', 'num_classes': 10,
         'splits': ['train', 'val', 'test'], 'split_size': 0.7,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'accuracy'
     },
     'CIFAR100': {
-        'class': datasets.CIFAR100, 'dir': 'CIFAR100', 'num_classes': 100,
+        'class': datasets.CIFAR100, 'dir': 'CIFAR100_new/CIFAR100/', 'num_classes': 100,
         'splits': ['train', 'val', 'test'], 'split_size': 0.7,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'accuracy'
     },
     'OxfordFlowers102': {
-        'class': None, 'dir': 'oxford_flowers102/', 'num_classes': 102,
+        'class': None, 'dir': 'flowers102-new/flowers/', 'num_classes': 102,
         'splits': ['train', 'validation', 'test'], 'split_size': 0.5,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'mean per-class accuracy'
     }, 
     'celeba': {
         'class': CelebA, 'dir': 'CelebA', 'num_classes': 40,
         'splits': ['train', 'valid', 'test'], 'split_size': 0.5,
         'target_type': 'landmarks',
-        'mode': 'regression'
+        'mode': 'regression', 'metric': 'r2'
     },
     '300w': {
         'class': FacesInTheWild300W, 'dir': '300W', 'num_classes': 136,
         'splits': ['train', 'valid', 'test'], 'split_size': 0.5,
-        'mode': 'regression'
+        'mode': 'regression', 'metric': 'r2'
     },
     'animal_pose':{
-        'class': AnimalPose, 'dir': 'animal_pose', 'num_classes': 40,
-        'splits': [], 'split_size': 0.8,
-        'mode': 'pose_estimation'
+        'class': AnimalPose, 'dir': 'animal_pose/animalpose_keypoint_new/', 'num_classes': 40,
+        'splits': [], 'split_size': 0.6,
+        'mode': 'pose_estimation', 'metric': 'pca'
     },
     'causal3d':{
         'class': Causal3DIdent, 'dir': 'Causal3d', 'num_classes': 10,
-        'splits': ['train', 'test'], 'split_size': 0.8,
-        'mode': 'regression'
+        'splits': ['train', 'test'], 'split_size': 0.6,
+        'mode': 'regression', 'metric': 'r2'
     },
     'aloi':{
-        'class': ALOI, 'dir': 'ALOI/png4/', 'num_classes': 1,
-        'splits': [], 'split_size': 0.8,
-        'mode': 'regression'
+        'class': ALOI, 'dir': 'ALOI/png4/', 'num_classes': 24,
+        'splits': [], 'split_size': 0.6,
+        'mode': 'classification', 'metric': 'accuracy'
     },
     'mpii':{
-        'class': MPII, 'dir': 'MPII', 'num_classes': 32,
-        'splits': [], 'split_size': 0.8,
-        'mode': 'pose_estimation'
+        'class': MPII, 'dir': 'mpii', 'num_classes': 32,
+        'splits': [], 'split_size': 0.6,
+        'mode': 'pose_estimation', 'metric': 'pca'
     },
     'Caltech101': {
         'class': None, 'dir': 'Caltech101', 'num_classes': 102,
         'splits': ['train', 'train', 'test'], 'split_size': 0.7,
-        'mode': 'classification'
+        'mode': 'classification', 'metric': 'mean per-class accuracy'
     },
     'leeds_sports_pose': {
         'class': LeedsSportsPose, 'dir': 'LeedsSportsPose', 'num_classes': 28,
         'splits': ['train', 'test'], 'split_size': 0.8,
-        'mode': 'regression'
+        'mode': 'regression', 'metric': 'r2'
     }
 }
 
@@ -117,28 +116,31 @@ def get_dataset(dataset_name, root, train_transform, val_transform, sample_rate=
         if num_samples_per_classes is not None, e.g. 5, then sample 5 images for each class, and use them to train the model;
         otherwise, keep all the data.
     """
-    dataset = datasets.__dict__[dataset_name]
+    if dataset_name == 'CIFAR10':
+        dataset = datasets.CIFAR10
+    elif dataset_name == 'CIFAR100':
+        dataset = datasets.CIFAR100
+    else:
+        dataset = datasets.__dict__[dataset_name]
     if sample_rate < 100:
         train_dataset = dataset(root=root, split='train', sample_rate=sample_rate, download=True, transform=train_transform)
         test_dataset = dataset(root=root, split='test', sample_rate=100, download=True, transform=val_transform)
         num_classes = train_dataset.num_classes
     else:
-        train_dataset = dataset(root=root, split='train', download=True, transform=train_transform)
-        if dataset_name in ['DTD', 'OxfordFlowers102']:
-            val_dataset = dataset(root=root, split='validation', download=True, transform=val_transform)
-        elif dataset_name in ['Caltech101']:
-            val_dataset = dataset(root=root, split='test', download=True, transform=val_transform)
-        else:
-            val_dataset = dataset(root=root, split='val', download=True, transform=val_transform)
-        test_dataset = dataset(root=root, split='test', download=True, transform=val_transform)
+        train_dataset = dataset(root=root, split='train', download=False, transform=train_transform)
         num_classes = train_dataset.num_classes
-        if num_samples_per_classes is not None:
-            samples = list(range(len(train_dataset)))
-            random.shuffle(samples)
-            samples_len = min(num_samples_per_classes * num_classes, len(train_dataset))
-            print("Origin dataset:", len(train_dataset), "Sampled dataset:", samples_len, "Ratio:", float(samples_len) / len(train_dataset))
-            train_dataset = Subset(train_dataset, samples[:samples_len])
-    return train_dataset,val_dataset, test_dataset, num_classes
+        if dataset_name in ['DTD', 'OxfordFlowers102']:
+            # Val split is available for these datasets
+            val_dataset = dataset(root=root, split='validation', download=False, transform=val_transform)
+        else:
+            train_size = int(0.8*len(train_dataset))
+            train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, len(train_dataset) - train_size],
+                                                generator = generator)
+
+        test_dataset = dataset(root=root, split='test', download=False, transform=val_transform)
+        
+
+    return train_dataset, val_dataset, test_dataset, num_classes
 
 
 def get_train_transform(resizing='default', random_horizontal_flip=True, random_color_jitter=False):
@@ -219,38 +221,42 @@ def get_val_transform(resizing='default'):
 def get_feature_datasets(args, models_ensemble): 
     train_transform = get_train_transform(args.train_resizing, not args.no_hflip, args.color_jitter)
     val_transform = get_val_transform(args.val_resizing)
-    if dataset_info[args.test_dataset]['mode'] in ['regression', 'pose_estimation']:
+
+    if dataset_info[args.test_dataset]['mode'] in ['regression', 'pose_estimation'] or args.test_dataset == 'aloi':
         num_classes = dataset_info[args.test_dataset]['num_classes']
         # if no splilt is given, then divide training data into train and val
         if len(dataset_info[args.test_dataset]['splits']) == 0:
             dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir'])
                                                 ,transform = train_transform)
             train_size = int(len(dataset)* dataset_info[args.test_dataset]['split_size'])
-            train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, len(dataset) - train_size])
-            val_size = int(len(val_dataset)*0.8)
-            val_dataset, test_dataset = torch.utils.data.random_split(val_dataset, [val_size, len(val_dataset) - val_size])
+            val_size = (len(dataset) - train_size)//2
+            test_size = len(dataset) - train_size - val_size
+            train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size], 
+                                                                        generator = generator)
         else: 
             # If split is given, use the split to make dataloaders
             train_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
-                                split = dataset_info[args.test_dataset]['splits'][0], transform = train_transform)
-            print("Train dataset", len(train_dataset))
-            val_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
-                                split = dataset_info[args.test_dataset]['splits'][1], transform = val_transform)
+                                split = 'train', transform = train_transform)
             if len(dataset_info[args.test_dataset]['splits']) == 3:
-                    test_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
+                val_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
+                                split = dataset_info[args.test_dataset]['splits'][1], transform = val_transform)
+                test_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
                                 split = dataset_info[args.test_dataset]['splits'][2], transform = val_transform)
-                    # print("Datasets", len(train_dataset), len(val_dataset), len(test_dataset))
-            else: 
+            elif(len(dataset_info[args.test_dataset]['splits'])) == 2: 
                 # only contains train and val splits
-                val_size = int(len(val_dataset)*0.8)
-                val_dataset, test_dataset = torch.utils.data.random_split(val_dataset, [val_size, len(val_dataset) - val_size])
-
+                train_size = int(len(train_dataset)* dataset_info[args.test_dataset]['split_size'])
+                val_size = len(train_dataset) - train_size
+                train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size], 
+                                                                            generator = generator)
+                test_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
+                                split = 'test', transform = val_transform)
+                print("Datasets", len(train_dataset), len(val_dataset), len(test_dataset))
+                
     else:
-        train_dataset, val_dataset, test_dataset, num_classes = get_dataset(args.test_dataset, args.data_root, train_transform,
+        print(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']))
+        train_dataset, val_dataset, test_dataset, num_classes = get_dataset(args.test_dataset, os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), train_transform,
                                                                     val_transform, args.sample_rate,
                                                                     args.num_samples_per_classes)
-        # val_size = int(len(val_dataset)*0.8)
-        # val_dataset, test_dataset = torch.utils.data.random_split(val_dataset, [val_size, len(val_dataset) - val_size])
 
     print("Datasets", len(train_dataset), len(val_dataset), len(test_dataset))
 
@@ -262,34 +268,6 @@ def get_feature_datasets(args, models_ensemble):
     trainval_dataset = torch.utils.data.ConcatDataset([train_dataset, val_dataset])
     trainval_loader = DataLoader(trainval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
 
-    # print("Datasets", len(train_dataset), len(val_dataset), len(test_dataset))
-    # for split in ["train", "val", "test"]:
-    #     if args.baseline:
-    #         save_path = os.path.join("features", 'baseline', args.arch+ "_" + split + "_" + args.test_dataset+ ".pt")
-    #         save_path_labels = os.path.join("features", 'baseline', args.arch+ "_" + split + "_" + args.test_dataset+ "_labels.pt")
-    #     else:        
-    #         save_path = os.path.join("features", args.arch+ "_" + split + "_" + args.test_dataset+ ".pt")
-    #         save_path_labels = os.path.join("features", args.arch+ "_" + split + "_" + args.test_dataset+ "_labels.pt")
-    #     if not os.path.exists(save_path) or not os.path.exists(save_path_labels):
-    #         if split == 'train':
-    #             get_model_features(train_loader, split , args.test_dataset, args.arch, models_ensemble, args.gpu, output_path = 'features', baseline = args.baseline)
-    #         elif split == 'val':
-    #             get_model_features(val_loader, split, args.test_dataset, args.arch, models_ensemble, args.gpu, output_path = 'features', baseline = args.baseline)
-    #         elif split == 'test':
-    #             get_model_features(test_loader, split, args.test_dataset, args.arch, models_ensemble, args.gpu, output_path = 'features', baseline = args.baseline)
-    #     else:
-    #         print("Found precomputed features in %s" % (save_path))
-    #     if split == 'train':
-    #         train_images = torch.load(save_path)
-    #         train_labels = torch.load(save_path_labels)
-    #     if split == 'val':
-    #         val_images = torch.load(save_path)
-    #         val_labels = torch.load(save_path_labels)
-    #     if split == 'test':
-    #         test_images = torch.load(save_path)
-    #         test_labels = torch.load(save_path_labels)
-
-    # return train_images, train_labels, val_images, val_labels, test_images, test_labels, num_classes
     return train_loader, val_loader, trainval_loader, test_loader, num_classes
 
 def min_max_scale(data):
@@ -441,7 +419,7 @@ def get_scores(preds, labels, test_dataset):
     elif dataset_info[test_dataset]['mode'] == 'classification':
         return accuracy(preds, labels, topk=(1, 5))[0]
 
-def dist_acc(dists, thr=0.01):
+def dist_acc(dists, thr=0.001):
     ''' Return percentage below threshold while ignoring values with a -1 '''
     # dists = dists.detach().cpu().numpy()
     dist_cal = np.not_equal(dists, 0.0)
@@ -493,3 +471,79 @@ def get_model_features(loader, split, dataset, arch, model, gpu, output_path = '
     all_labels = torch.cat(all_labels)
     torch.save(all_features, save_path + ".pt")
     torch.save(all_labels, save_path + "_labels.pt")
+
+
+def load_backbone(args):
+    # Model 
+    if args.baseline:
+        if args.arch == 'resnet50':
+            # models_ensemble = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+            models_ensemble = resnet50()
+        elif args.arch == 'convnext':
+            models_ensemble = convnext_base(pretrained=True, num_classes=1000)
+    else:
+        if args.arch == 'resnet50':
+            models_ensemble = models.BranchedResNet(N = args.num_encoders, num_classes = 1000, arch = args.arch)
+        elif args.arch == 'convnext':
+            models_ensemble = models.DiverseConvNext(N = args.num_encoders, num_classes = 1000)
+
+    # optionally resume from a checkpoint, only for ensemble model
+    if args.pretrained:
+        if os.path.isfile(args.pretrained):
+            print("=> loading checkpoint '{}'".format(args.pretrained))
+            if args.gpu is None:
+                checkpoint = torch.load(args.pretrained)
+            else:
+                # Map model to be loaded to specified single gpu.
+                loc = 'cuda:{}'.format(args.gpu)
+                checkpoint = torch.load(args.pretrained, map_location=loc)
+            args.start_epoch = checkpoint['epoch']
+            state_dict = checkpoint['state_dict']
+            # if not args.baseline:
+            for k in list(state_dict.keys()):
+                # retain only base_encoder up to before the embedding layer
+                if k.startswith('module.'):
+                    # remove prefix
+                    state_dict[k[len("module."):]] = state_dict[k]
+                # delete renamed or unused k
+                del state_dict[k]
+
+            print(state_dict.keys())
+            models_ensemble.load_state_dict(state_dict, strict=False)
+            # optimizer.load_state_dict(checkpoint['optimizer'])
+            # scaler.load_state_dict(checkpoint['scaler'])
+            print("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.pretrained, checkpoint['epoch']))
+        else:
+            print("=> no checkpoint found at '{}'".format(args.pretrained))
+
+    if args.baseline:
+        if args.arch == 'resnet50':
+            models_ensemble.feat_dim = 2048 if args.arch == 'resnet50' else 512
+            if dataset_info[args.test_dataset] in ['aloi', 'animal_pose', 'mpii']:
+                models_ensemble.global_pool = nn.Identity()
+            models_ensemble.fc = nn.Identity()
+        elif args.arch == 'convnext':
+            models_ensemble.head.fc = nn.Identity()
+    else:
+        if args.arch == 'resnet50':
+            feat_dim = 2048 if args.arch == 'resnet50' else 512
+            models_ensemble.base_model.branches_fc = nn.ModuleList([nn.Identity() for i in range(args.num_encoders + 1)])
+        elif args.arch == 'convnext':
+            for ind in range(args.num_encoders):
+                models_ensemble.base_model.head[ind].fc = nn.Identity()
+    
+    # freeze all layers but the last fc
+    for name, param in models_ensemble.named_parameters():
+        # if args.few_shot_reg is None:
+        if args.arch == 'resnet50':
+            if "fc" not in name:
+                param.requires_grad = False
+        elif args.arch == 'convnext':
+            if "head" not in name:
+                param.requires_grad = False
+        # print(name, param.requires_grad)
+
+    # infer learning rate before changing batch size, not done in hyoer-models
+    models_ensemble = models_ensemble.cuda(args.gpu)
+    return models_ensemble

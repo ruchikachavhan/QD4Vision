@@ -2,45 +2,52 @@ import torch
 import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.resnet import resnet50, resnet18
+from torchvision.models import resnet50, ResNet50_Weights
 from timm.models.convnext import convnext_base
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 import math
 
 class BranchedResNet(nn.Module):
-    def __init__(self, N, arch, num_classes, stop_grad = True, pretrained=True):
+    def __init__(self, N, arch, num_classes, stop_grad = True):
         super(BranchedResNet, self).__init__()
         if arch == 'resnet50':
-            self.base_model = resnet50(pretrained = pretrained)
+            #  Load ImageNet1k_V2 weights
+            self.base_model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
             self.num_feat = 2048
-        elif arch == 'resnet18':
-            self.base_model = resnet18(pretrained = pretrained)
-            self.num_feat = 512
-        self.N = N
+        self.N = N + 1
         self.num_classes = num_classes
 
-        # Branching out only one Resnet50 layer
-        self.base_model.branches_layer4 = nn.ModuleList([resnet50(pretrained=False).layer4 for _ in range(N)])
-        self.base_model.branches_fc = nn.ModuleList([nn.Linear(self.num_feat, num_classes) for _ in range(N)])
-
         del self.base_model.layer4, self.base_model.fc
+
+        # Branching out only one Resnet50 layer
+        self.base_model.branches_layer4 = nn.ModuleList([resnet50(weights=ResNet50_Weights.IMAGENET1K_V2).layer4 for _ in range(self.N)])
+        self.base_model.branches_fc = nn.ModuleList([resnet50(weights=ResNet50_Weights.IMAGENET1K_V2).fc for _ in range(self.N)])
 
         if stop_grad:
             for name, param in self.base_model.named_parameters():
                 if 'layer4' not in name and 'fc' not in name:
                     param.requires_grad = False
                 print(name, param.requires_grad)
+        
+        # Freezing gradients of baseline model in ensemble
+        for name, param in self.base_model.branches_layer4[-1].named_parameters():
+            param.requires_grad = False
+            print(name, param.requires_grad)
+        
+        for name, param in self.base_model.branches_fc[-1].named_parameters():
+            param.requires_grad = False
+            print(name, param.requires_grad)
 
     def forward(self, x, reshape = True):
         x = self.base_model.conv1(x)
         x = self.base_model.bn1(x)
-        x = self.base_model.act1(x)
+        x = self.base_model.relu(x)
         x = self.base_model.maxpool(x)
         x = self.base_model.layer1(x)
         x = self.base_model.layer2(x)
         x = self.base_model.layer3(x)
-        feats = [self.base_model.global_pool(self.base_model.branches_layer4[i](x)) for i in range(self.N)]
+        feats = [self.base_model.avgpool(self.base_model.branches_layer4[i](x)).view(x.shape[0], -1) for i in range(self.N)]
         outputs = [self.base_model.branches_fc[i](feats[i]) for i in range(self.N)]
 
         if reshape:

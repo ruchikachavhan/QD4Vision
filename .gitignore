@@ -19,5 +19,6 @@
 mmsegmentation/
 downstream_results/
 features/
+results/
 __pycache__
 wandb/
