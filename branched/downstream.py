@@ -31,10 +31,6 @@ import wandb
 from downstream_utils import *
 from sklearn.linear_model import LogisticRegression as LogReg
 
-clf = LogReg(solver='lbfgs', multi_class='multinomial', warm_start=True)
-print("CLF", clf)
-
-
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))

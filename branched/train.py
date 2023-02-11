@@ -502,7 +502,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
             print("Training Accuracies of all backbones", train_acc1, train_acc5)
             print("Test Accuracies of all backbones", test_acc1, test_acc5)
-            print("Test Accuracies of all backbones with EMA", test_acc1_ema, test_acc5_ema)
+            print("Test Accuracies of all backbones with EMA", test_ac§c1_ema, test_acc5_ema)
             print("Train sim", train_avg_sim)
             print("Val sim", val_avg_sim, coeff)
 
@@ -515,11 +515,7 @@ def main_worker(gpu, ngpus_per_node, args):
             
             np.save('train' + "_" +  args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_augs.npy", train_avg_sim.detach().cpu().numpy())
             np.save("val" + "_" + args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_augs.npy", val_avg_sim.detach().cpu().numpy())
-            # early_stopping(train_loss, val_loss)
-            # if early_stopping.early_stop:
-            #     print("We are at epoch:", epoch)
-            #     break
-            # else:
+
             if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                     and args.rank == 0): # only the first GPU saves checkpoint
                 
