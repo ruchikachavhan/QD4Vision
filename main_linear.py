@@ -138,7 +138,7 @@ def main_worker(config=None):
 
     models_ensemble = load_backbone(args)
         
-    train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets(args, models_ensemble)
+    train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets(args)
     # train_images, train_labels, val_images, val_labels, test_images, test_labels = train_images.cpu(), train_labels.cpu(), val_images.cpu(), val_labels.cpu(), test_images.cpu(), test_labels.cpu()
 
     X_train_feature, y_train, X_val_feature, y_val = get_features(
@@ -172,7 +172,7 @@ def main_worker(config=None):
         if args.stacking:
             list_ensemble = []
             for i in range(len(clf)):
-                list_ensemble.append((str(i), clf[i].clf))
+                list_ensemble.append((str(i), clf[i]))
             if dataset_info[args.test_dataset]['mode'] in ['regression', 'pose_estimation']:     
                 stack_clf = StackingModel(classifiers = list_ensemble, mode=dataset_info[args.test_dataset]['mode'],
                                 metric=dataset_info[args.test_dataset]['metric'])
@@ -195,17 +195,13 @@ def main_worker(config=None):
         else:
             results_file = open(os.path.join("results", args.test_dataset + ".json"), 'w')
         for k in range(0, args.num_encoders+1):
-            iter = 0
             for wd in tqdm(wd_range, desc='Selecting best ridge hyperparameters for classifier' + str(k)):
                 clf[k], C = set_params(clf[k], wd, dataset_info[args.test_dataset]['mode'])
                 val_acc = clf[k].fit_regression(X_train_feature[k], y_train, X_val_feature[k], y_val)
-                print(C, val_acc)
                 if val_acc > best_score[k]:
                     best_params[str(k)] = C
                     best_score[k] = val_acc
                 
-                iter += 1
-
             print("Best hyper parameter for reg.", best_params[str(k)], best_score)
 
         all_results['HPO result'] = best_params
@@ -220,7 +216,6 @@ def main_worker(config=None):
                 val_pred = clf[k].get_pred(X_val_feature[k])
                 val_preds.append(val_pred)
             lstsq_weights = find_lstsq_weights(val_preds, y_val, num_classes, mode = dataset_info[args.test_dataset]['mode'])
-            print(lstsq_weights)
             lstsq_weights = minmax_scale(lstsq_weights)
             all_results['weights'] = lstsq_weights.tolist()
             print(lstsq_weights)
@@ -235,7 +230,7 @@ def main_worker(config=None):
             test_preds.append(test_pred)
             test_accuracies.append(test_acc)
         
-        print("ALL test accuracies", test_accuracies)
+        print("All test accuracies", test_accuracies)
         all_results['test accuracies'] = test_accuracies
 
         if not args.stacking:
@@ -265,7 +260,6 @@ def main_worker(config=None):
         for wd in tqdm(wd_range, desc='Selecting best hyperparameters for classifier'):
             clf, C = set_params(clf, wd, dataset_info[args.test_dataset]['mode'])
             val_acc = clf.fit_regression(X_train_feature, y_train, X_val_feature, y_val)
-            print(C, val_acc)
             if val_acc > best_score:
                 best_score = val_acc
                 best_params["C"] = C
@@ -296,6 +290,7 @@ def find_lstsq_weights(val_preds, y_val, num_classes, mode):
         y_val_ = np.eye(num_classes)[y_val].reshape(-1)
     else:
         y_val_ = y_val.reshape(-1)
+    
     lstsq_weights = np.linalg.lstsq(val_preds, y_val_)[0]
     # lstsq_weights = nnls(val_preds, y_val_)[0]
     lstsq_weights = np.expand_dims(lstsq_weights, 1)
@@ -385,8 +380,13 @@ class LogisticRegression(nn.Module):
         return self.clf.predict_log_proba(X)
 
     def get_accuracy(self, y_pred, y_true, mode=None):
-        y_pred = y_pred.argmax(1)
-        return accuracy_score(y_pred, y_true) * 100.
+        if self.metric == 'accuracy':
+            y_pred = y_pred.argmax(1)
+            return accuracy_score(y_true, y_pred) * 100.
+        else:
+            cm = confusion_matrix(y_true, y_pred.argmax(1))
+            cm = cm.diagonal() / cm.sum(axis=1) 
+            return 100. * cm.mean()
 
 class LinearRegression(nn.Module):
     def __init__(self, input_dim, output_dim, metric):
@@ -435,60 +435,58 @@ class StackingModel(nn.Module):
         super().__init__()
         self.classifiers = classifiers
         self.metric = metric
+        self.mode = mode
         if mode == 'classification':
             self.final_estimator = LogReg(solver='lbfgs', multi_class='multinomial', warm_start=True)
         else:
-            self.final_estimator = LinReg(solver='auto')
+            self.final_estimator = LinearRegression(input_dim=2048*6, output_dim=None, metric=self.metric)
+            self.wd_range = torch.logspace(-2, 5, 100)
 
         self.metric = metric
         self.kfold = KFold(5, shuffle = True, random_state=1)
         self.stack_mode = stack_mode
 
+    def get_preds(self, X_train):
+        preds = []
+        for id, clf in self.classifiers:
+            if self.stack_mode == 'features':
+                pred = X_train[:, int(id), :]
+            else:
+                pred = clf.get_pred(X_train[:, int(id), :])
+            preds.append(pred)
+        preds = np.transpose(np.array(preds), (1, 0, 2))
+        preds = preds.reshape(preds.shape[0], -1)
+        return preds
 
     def fit_regression(self, X_trainval, y_trainval, X_test, y_test):
         # We assume all the base classifiers are tuned with val set before stacking
+        X_trainval = np.transpose(X_trainval, (1, 0, 2))
+        X_test = np.transpose(X_test, (1, 0, 2))
+
+        best_score = 0.0
+        best_params = {}
+        # K fold validation
         for train, test in self.kfold.split(X_trainval):
-            print(train.shape, test.shape)
-            # preds = []
-            # for id, clf in self.classifiers:
-            #     if self.stack_mode == 'features':
-            #         pred = train[int(id)]
-            #     else:
-            #         pred = clf.get_pred(train)
-            #     preds.append(pred)
-            # preds = np.array(preds)
-            # print(preds.shape)
-            # self.final_estimator.fit(preds, y_trainval)
-            # score = self.get_accuracy_metric()
+            X_train, y_train = X_trainval[train], y_trainval[train]
+            X_val, y_val =  X_trainval[test], y_trainval[test]
+            
+            # stack predictions
+            preds = self.get_preds(X_train)
+            val_preds = self.get_preds(X_val)
+            trainval_preds = self.get_preds(X_trainval)
+            test_preds = self.get_preds(X_test)
+            # Fit final estimator 
+            for wd in tqdm(self.wd_range, desc='Selecting best hyperparameters for final stacking classifier'):
+                self.final_estimator, C = set_params(self.final_estimator, wd, self.mode)
+                score = self.final_estimator.fit_regression(preds, y_train, val_preds, y_val)
+                if score > best_score:
+                    best_score = score
+                    best_params["C"] = C
 
-
-    def get_accuracy_metric(self, X_train, y_train, X_test, y_test):
-        if self.metric == 'r2':
-            self.stack_clf.fit(X_train, y_train)
-            test_acc = 100. * self.stack_clf.score(X_test, y_test)
-            return test_acc
-
-        elif self.metric == 'pca':
-            self.stack_clf.fit(X_train, y_train)
-            pred_test = self.stack_clf.predict(X_test)
-            test_score = dist_acc((pred_test - y_test)**2)
-            return test_score
-        
-        elif self.metric == 'accuracy':
-            self.stack_clf.fit(X_train, y_train)
-            test_acc = 100. * self.stack_clf.score(X_test, y_test)
-            return test_acc
-
-        elif self.metric == 'mean per-class accuracy':
-            self.stack_clf.fit(X_train, y_train)
-            pred_test = self.stack_clf.predict(X_test)
-
-            #Get the confusion matrix
-            cm = confusion_matrix(y_test, pred_test)
-            cm = cm.diagonal() / cm.sum(axis=1) 
-            test_score = 100. * cm.mean()
-            return test_score
-
+        print(best_params, best_score)
+        self.final_estimator, _ = set_params(self.final_estimator, torch.tensor(best_params["C"]), self.mode)
+        test_score = self.final_estimator.fit_regression(trainval_preds, y_trainval, test_preds, y_test)
+        print("TEST", test_score)
 
 
 

@@ -153,7 +153,7 @@ class Flowers(Dataset):
 
 
 class FacesInTheWild300W(Dataset):
-    def __init__(self, root, split, mode='indoor+outdoor', transform=None, loader=default_loader, download=False, shots = None):
+    def __init__(self, root, split, mode='indoor+outdoor', transform=None, loader=default_loader, download=False):
         self.root = root
         self.split = split
         self.mode = mode
@@ -174,13 +174,13 @@ class FacesInTheWild300W(Dataset):
 
         split_path = os.path.join(self.root, f'{mode}_{split}.npy')
         while not os.path.exists(split_path):
-            self.generate_dataset_splits(len(images), shots=shots)
+            self.generate_dataset_splits(len(images))
         split_idxs = np.load(split_path)
         print(split, split_path, max(split_idxs), len(images), len(keypoints))
         self.images = [images[i] for i in split_idxs-1]
         self.keypoints = [keypoints[i] for i in split_idxs-1]
 
-    def generate_dataset_splits(self, l, split_sizes=[0.3, 0.3, 0.4], shots = None):
+    def generate_dataset_splits(self, l, split_sizes=[0.3, 0.3, 0.4]):
         np.random.seed(0)
         print(split_sizes)
         assert sum(split_sizes) == 1

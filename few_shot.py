@@ -11,7 +11,8 @@ import torch.optim as optim
 import torch.backends.cudnn as cudnn
 from sklearn.linear_model import LogisticRegression
 from downstream_utils import *
-from torchvision.datasets import ImageFolder
+import torchvision
+from torchvision.datasets import ImageFolder, Flowers102
 from PIL import Image
 import torchvision.models as torchvision_models
 from main_linear import find_lstsq_weights
@@ -21,6 +22,22 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore", message=r"Passing", category=FutureWarning)
 
+
+dataset_info = {
+    'fc100': {
+        'dir': 'CIFAR100_new/CIFAR100/', 'num_classes': 100,
+    },
+    'cub200': {
+        'dir': 'CUB200', 'num_classes': 200,
+    },
+    'plant_disease': {
+        'dir': 'plant_diseases/plant_diseases/', 'num_classes': 20,
+    },
+    'flowers': {
+        'dir': 'flowers/', 'num_classes': 102,
+    },
+    
+}
 def load_fewshot_datasets(dataset='cifar10',
                           datadir='/data',
                           pretrain_data='imagenet100'):
@@ -42,34 +59,44 @@ def load_fewshot_datasets(dataset='cifar10',
                                T.Normalize(mean, std)])
 
     if dataset == 'cub200':
-        train = ImageFolder(os.path.join(datadir, 'train'), transform=transform)
-        test  = ImageFolder(os.path.join(datadir, 'test'),  transform=transform)
+        train = ImageFolder(os.path.join(datadir, dataset_info[dataset]['dir'], 'train'), transform=transform)
+        test  = ImageFolder(os.path.join(datadir, dataset_info[dataset]['dir'], 'test'),  transform=transform)
         test.samples = train.samples + test.samples
         test.targets = train.targets + test.targets
 
     elif dataset == 'fc100':
-        train = ImageFolder(os.path.join(datadir, 'train'), transform=transform)
-        test  = ImageFolder(os.path.join(datadir, 'test'),  transform=transform)
-        test.samples = train.samples + test.samples
-        test.targets = train.targets + test.targets
+        train = ImageFolder(os.path.join(datadir, dataset_info[dataset]['dir'], 'train'), transform=transform)
+        # test  = ImageFolder(os.path.join(datadir, dataset_info[dataset]['dir'], 'val'),  transform=transform)
+        test  = ImageFolder(os.path.join(datadir, dataset_info[dataset]['dir'], 'test'),  transform=transform)
+        # test.samples = train.samples + test.samples
+        # test.targets = train.targets + test.targets
 
     elif dataset == 'plant_disease':
-        train = ImageFolder(os.path.join(datadir, 'train'), transform=transform)
-        test  = ImageFolder(os.path.join(datadir, 'test'),  transform=transform)
+        train = ImageFolder(os.path.join(datadir, dataset_info[dataset]['dir'], 'train'), transform=transform)
+        test  = ImageFolder(os.path.join(datadir, dataset_info[dataset]['dir'], 'valid'),  transform=transform)
         test.samples = train.samples + test.samples
         test.targets = train.targets + test.targets
 
+    elif dataset == 'flowers':
+        train = Flowers102(os.path.join(datadir, dataset_info[dataset]['dir']), download=True, split='train', transform=transform)
+        val  = Flowers102(os.path.join(datadir, dataset_info[dataset]['dir']), download=True, split = 'val', transform=transform)
+        test  = Flowers102(os.path.join(datadir, dataset_info[dataset]['dir']), download=True, split = 'test', transform=transform)
+        test._image_files = train._image_files + test._image_files
+        test._labels = train._labels + test._labels
+    
     return dict(test=test)
 
 
 class FewShotBatchSampler(torch.utils.data.Sampler):
-    def __init__(self, dataset, N, K, Q, num_iterations):
+    def __init__(self, dataset, N, K, Q, num_iterations, name):
         self.N = N
         self.K = K
         self.Q = Q
         self.num_iterations = num_iterations
-
-        labels = [label for _, label in dataset.samples]
+        if name == 'flowers':
+            labels = [label for label in dataset._labels]
+        else:
+            labels = [label for _, label in dataset.samples]
         self.label2idx = defaultdict(list)
         for i, y in enumerate(labels):
             self.label2idx[y].append(i)
@@ -100,13 +127,13 @@ def main(args):
     device = args.gpu
 
     # DATASETS
-    datasets = load_fewshot_datasets(dataset=args.dataset,
+    datasets = load_fewshot_datasets(dataset=args.test_dataset,
                                      datadir=args.datadir)
     print(datasets['test'])
     if not args.baseline:
         args.Q = 2 * args.Q
     build_sampler    = partial(FewShotBatchSampler,
-                               N=args.N, K=args.K, Q=args.Q, num_iterations=args.num_tasks)
+                               N=args.N, K=args.K, Q=args.Q, num_iterations=args.num_tasks, name = args.test_dataset)
     build_dataloader = partial(torch.utils.data.DataLoader,
                                num_workers=args.num_workers)
     testloader  = build_dataloader(datasets['test'],  batch_sampler=build_sampler(datasets['test']))
@@ -116,9 +143,9 @@ def main(args):
 
     all_accuracies = []
     if args.baseline:
-        results_file = open(os.path.join("results", "few_shot", args.dataset + "_" + args.K + "_baseline.txt"), 'w')
+        results_file = open(os.path.join("results", "few_shot", args.test_dataset + "_" + str(args.K) + "_baseline.txt"), 'w')
     else:
-        results_file = open(os.path.join("results", "few_shot", args.dataset + "_" + args.K + ".txt"), 'w')
+        results_file = open(os.path.join("results", "few_shot", args.test_dataset + "_" + str(args.K) + ".txt"), 'w')
     for i, (batch, _) in tqdm(enumerate(testloader)):
         with torch.no_grad():
             batch = batch.to(device)
@@ -129,7 +156,6 @@ def main(args):
             test_batch   = batch[:, args.K:].reshape(args.N*args.Q, C, H, W)
             train_labels = torch.arange(args.N).unsqueeze(1).repeat(1, args.K).to(device).view(-1)
             test_labels  = torch.arange(args.N).unsqueeze(1).repeat(1, args.Q).to(device).view(-1)
-
         with torch.no_grad():
             if args.baseline:
                 X_train = backbone(train_batch)
@@ -147,7 +173,8 @@ def main(args):
         if args.baseline:
             classifier = LogisticRegression(solver='liblinear').fit(X_train.cpu().numpy(),
                                                                         Y_train.cpu().numpy())
-            acc = classifier.score(X_test.cpu().numpy(), Y_test.cpu().numpy())
+            preds = classifier.predict(X_test.cpu().numpy())
+            acc = np.mean((Y_test.cpu().numpy() == preds).astype(float))
             all_accuracies.append(acc)
         else:
             spt_preds = []
@@ -159,24 +186,27 @@ def main(args):
                 qry_pred = classifier.predict_log_proba(X_test[k].cpu().numpy())
                 spt_preds.append(spt_pred)
                 qry_preds.append(qry_pred)
-
-            lstsq_weights = find_lstsq_weights(qry_pred[0:args.Q//2], Y_test[0:args.Q//2].cpu().numpy(), args.N, mode='classification')
+            
+            spt_preds = np.array(spt_preds).reshape(len(spt_preds), -1)
+            spt_preds = np.transpose(spt_preds)
+            Y_train_ = np.eye(args.N)[Y_train.cpu().numpy()].reshape(-1)
+            lstsq_weights = np.linalg.lstsq(spt_preds, Y_train_)[0]
+            lstsq_weights = np.expand_dims(lstsq_weights, 1)
             lstsq_weights = minmax_scale(lstsq_weights)
             qry_preds = np.array(qry_preds)
             qry_preds = np.swapaxes(qry_preds, 0, 2)
 
             weighted_preds = np.matmul(qry_preds, lstsq_weights).squeeze(2)
             weighted_preds = np.transpose(weighted_preds)/sum(lstsq_weights)
-            acc = accuracy_score(weighted_preds.argmax(1), Y_test.cpu().numpy())        
+            acc = accuracy_score(Y_test.cpu().numpy(), weighted_preds.argmax(1))   
             all_accuracies.append(acc)
 
     avg = np.mean(all_accuracies)
     std = np.std(all_accuracies) * 1.96 / np.sqrt(len(all_accuracies))
-    results_file.write("Accuracy, " + str(acc))
+    results_file.write("Accuracy, " + str(avg))
     results_file.write("\n")
     results_file.write("Std, " + str(std))
-    print("ACCURACY", acc, std)
-    # logger.log_msg(f'mean: {avg:.4f}±{std:.4f}')
+    print("ACCURACY", avg, std)
 
 
 if __name__ == '__main__':
@@ -186,8 +216,8 @@ if __name__ == '__main__':
 
     model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base', 'convnext'] + torchvision_model_names
     parser = ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='cub200')
-    parser.add_argument('--datadir', type=str, default='/data')
+    parser.add_argument('--test_dataset', type=str, default='cub200')
+    parser.add_argument('--datadir', type=str, default='')
     parser.add_argument('--N', type=int, default=5)
     parser.add_argument('--K', type=int, default=1)
     parser.add_argument('--Q', type=int, default=16)

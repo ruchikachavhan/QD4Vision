@@ -102,14 +102,10 @@ class Block(nn.Module):
 
       if self.i_downsample is not None:
           identity = self.i_downsample(identity)
-      print(x.shape)
-      print(identity.shape)
       x += identity
       x = self.relu(x)
       return x
 
-
-        
         
 class ResNet(nn.Module):
     def __init__(self, ResBlock, layer_list, num_classes, num_tasks, num_channels=3):

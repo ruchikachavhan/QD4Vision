@@ -218,7 +218,7 @@ def get_val_transform(resizing='default'):
     ])
 
 
-def get_feature_datasets(args, models_ensemble): 
+def get_feature_datasets(args): 
     train_transform = get_train_transform(args.train_resizing, not args.no_hflip, args.color_jitter)
     val_transform = get_val_transform(args.val_resizing)
 
@@ -270,146 +270,10 @@ def get_feature_datasets(args, models_ensemble):
 
     return train_loader, val_loader, trainval_loader, test_loader, num_classes
 
-def min_max_scale(data):
-    # print(data.shape)
-    min = data.min(1)[0].view(-1, 1)
-    max = data.max(1)[0].view(-1, 1)
-    # print(min.shape, max.shape)
-    data = (data - min)/(max-min)
-    return data 
-
 def standardize(data):
     means = data.mean(2, keepdim=True)
     std = data.std(2, keepdim=True)
     return (data - means)/std
-
-
-def train_fc(image_loader, label_loader, classifier, optimizer, criterion,  args, batch_size, epoch, train_mode):
-    indices = torch.randperm(image_loader.size()[0])
-    image_loader = image_loader[indices]
-    label_loader = label_loader[indices]
-    batches = torch.split(image_loader, batch_size)
-    batches_y = torch.split(label_loader, batch_size)
-
-    avg_loss = 0.0
-    avg_acc = 0.0
-    all_logits, all_labels = [], []
-    # np.array([0.0 for _ in range(args.num_encoders)])
-    for iter in range(len(batches)):
-        x = batches[iter].cuda(args.gpu)
-        y = batches_y[iter].cuda(args.gpu)
-        if args.baseline:
-            def loss_closure():
-                pred = classifier(x)
-                loss = criterion(pred, y)
-                optimizer.zero_grad()
-                loss.backward()
-                return loss
-        else:
-            loss = 0.0
-            acc = []
-            preds, acc = [], []
-            loss = 0.0
-            for k in range(args.num_encoders):
-                pred = classifier[k](x[:, k, :])
-                loss += criterion(pred, y)
-                preds.append(pred)
-                accuracy = get_scores(pred, y, args.test_dataset).cpu().numpy()
-                acc.append(accuracy)
-
-                avg_loss += loss.item()
-                avg_acc += np.array(acc)
-
-            if not train_mode:
-                all_logits.append(torch.cat(preds).reshape(args.num_encoders, x.shape[0], -1).detach())
-                all_labels.append(y)
-
-        if train_mode:
-            optimizer.step(loss_closure)
-
-        pred = classifier(x)
-        loss = criterion(pred, y)
-        accuracy = get_scores(pred, y, args.test_dataset)
-        avg_acc += accuracy
-        avg_loss += loss.item()
-        # optimizer.zero_grad()
-        # loss.backward()
-        # loss = optimizer.step()
-
-    if not args.baseline:
-        if not train_mode:
-            all_logits = torch.cat(all_logits, dim=1)
-            all_labels = torch.cat(all_labels, dim=0)
-            
-            lstsq_weights, lstsq_loss, lstsq_accuracies = get_lstsq_solution(all_logits, all_labels, 10, criterion, args.test_dataset)
-
-            # Save LSTSQ search weights in a file 
-            results = {"lstsq_weights": lstsq_weights.tolist(), "loss": lstsq_loss, "accuracy": lstsq_accuracies.item()}
-            with open(os.path.join("downstream_results" , args.test_dataset + "_search_results_" + '.json'), 'w') as f:
-                json.dump(results, f)
-
-    if args.baseline or train_mode:
-        return avg_loss/(iter+1), avg_acc/(iter+1), None
-    else:
-        return lstsq_loss, lstsq_accuracies, lstsq_weights
-
-
-def get_lstsq_solution(logits, labels, num_classes, criterion, test_dataset):  
-    if dataset_info[test_dataset]['mode'] in ['regression', 'pose_estimation']:
-        A = logits.reshape(logits.shape[0], -1)
-        A = torch.transpose(A, 0, 1).detach().cpu().numpy()
-        labels_ = labels.reshape(-1).cpu().numpy()
-    else:
-        A = logits.reshape(logits.shape[0], -1)
-        A = torch.transpose(A, 0, 1).detach().cpu().numpy()
-        labels_ = F.one_hot(labels, num_classes = num_classes).reshape(-1).cpu().numpy()
-        
-    x1, _ , _, _ = np.linalg.lstsq(A, labels_)
-    x1 = torch.from_numpy(x1).cuda(logits.device).float()
-    logits_ = logits.permute(1, 2, 0)
-    weighted_logits = torch.matmul(logits_, x1)
-    loss = criterion(weighted_logits, labels).item()
-    acc = get_scores(weighted_logits, labels, test_dataset)
-    return x1.detach().cpu().numpy(), loss, acc
-
-def test(epoch, image_loader, label_loader, classifier, lstsq_weights, criterion, args):
-    indices = torch.randperm(image_loader.size()[0])
-    image_loader = image_loader[indices]
-    label_loader = label_loader[indices]
-    batches = torch.split(image_loader, args.batch_size)
-    batches_y = torch.split(label_loader, args.batch_size)
-
-    avg_loss = 0.0
-    avg_acc = 0.0
-    all_logits, all_labels = [], []
-    # np.array([0.0 for _ in range(args.num_encoders)])
-    for iter in range(len(batches)):
-        x = batches[iter].cuda(args.gpu)
-        y = batches_y[iter].cuda(args.gpu)
-        if args.baseline:
-            preds = classifier(x)
-            loss = criterion(preds, y)
-            acc = get_scores(preds, y, args.test_dataset)
-            avg_acc += acc
-            avg_loss += loss.item()
-        else:
-            loss = 0.0
-            acc = []
-            preds, acc = [], []
-            loss = 0.0
-            for k in range(args.num_encoders):
-                pred = classifier[k](x[:, k, :])
-                loss += criterion(pred, y)
-                preds.append(pred)
-                
-            preds = torch.cat(preds).reshape(args.num_encoders, x.shape[0], -1)
-            logits_ = preds.permute(1, 2, 0)
-            weighted_logits = torch.matmul(logits_, lstsq_weights)
-            loss = criterion(weighted_logits, y).item()
-            acc = get_scores(weighted_logits, y, args.test_dataset)
-            
-    return avg_loss/(iter+1), avg_acc/(iter+1)
-                
 
 def get_scores(preds, labels, test_dataset):
     if dataset_info[test_dataset]['mode'] == 'regression':
@@ -477,8 +341,9 @@ def load_backbone(args):
     # Model 
     if args.baseline:
         if args.arch == 'resnet50':
-            # models_ensemble = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
-            models_ensemble = resnet50()
+            print("Loading baseline")
+            models_ensemble = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+            # models_ensemble = resnet50()
         elif args.arch == 'convnext':
             models_ensemble = convnext_base(pretrained=True, num_classes=1000)
     else:
@@ -520,8 +385,11 @@ def load_backbone(args):
     if args.baseline:
         if args.arch == 'resnet50':
             models_ensemble.feat_dim = 2048 if args.arch == 'resnet50' else 512
-            if dataset_info[args.test_dataset] in ['aloi', 'animal_pose', 'mpii']:
-                models_ensemble.global_pool = nn.Identity()
+            try:
+                if dataset_info[args.test_dataset] in ['aloi', 'animal_pose', 'mpii']:
+                    models_ensemble.global_pool = nn.Identity()
+            except:
+                pass
             models_ensemble.fc = nn.Identity()
         elif args.arch == 'convnext':
             models_ensemble.head.fc = nn.Identity()
