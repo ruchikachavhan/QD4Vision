@@ -113,6 +113,7 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
@@ -177,8 +178,9 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
         x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        return x
+        feats = torch.flatten(x, 1)
+        x = self.fc(feats)
+        return x, feats
 
     def forward(self, x):
         return self._forward_impl(x)
@@ -260,7 +262,6 @@ class SuperNetSampler(nn.Module):
         if adapter_configuration is None:
             adapter_configuration = np.array([sample_adapter_configuration(self.num_adapters_per_conv) for _ in range(self.num_adapters)])
         disable_grad(self.model)
-        print(adapter_configuration)
         i_conf = 0
         for _, m in self.model.named_modules():
             if isinstance(m, TSA_Conv2d):

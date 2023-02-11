@@ -25,3 +25,4 @@ results/
 __pycache__
 wandb/
 .ipynb_checkpoints/
+adapters/train_results/
