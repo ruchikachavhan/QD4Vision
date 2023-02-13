@@ -185,7 +185,7 @@ def main_worker(config=None):
     else:
         wd_range = torch.logspace(-6, 5, 45)
 
-
+    print(y_val.shape)
     if not args.baseline:
         best_params = {}
         best_score = np.zeros(args.num_encoders + 1)
@@ -194,7 +194,8 @@ def main_worker(config=None):
             results_file = open(os.path.join("results", args.test_dataset + "_stacking.json"), 'w')
         else:
             results_file = open(os.path.join("results", args.test_dataset + ".json"), 'w')
-        for k in range(0, args.num_encoders+1):
+        # for k in range(0, args.num_encoders+1):
+        for k in range(0, 2):
             for wd in tqdm(wd_range, desc='Selecting best ridge hyperparameters for classifier' + str(k)):
                 clf[k], C = set_params(clf[k], wd, dataset_info[args.test_dataset]['mode'])
                 val_acc = clf[k].fit_regression(X_train_feature[k], y_train, X_val_feature[k], y_val)
@@ -211,9 +212,11 @@ def main_worker(config=None):
             print("----------------- Linear combination search ---------------")
             # Using best regulariser find linear combination weights using the val set
             val_preds = []
-            for k in range(0, args.num_encoders+1):
+            # for k in range(0, args.num_encoders+1):
+            for k in range(0, 2):
                 clf[k], _ = set_params(clf[k], torch.tensor(best_params[str(k)]), dataset_info[args.test_dataset]['mode'])
                 val_pred = clf[k].get_pred(X_val_feature[k])
+                print(val_pred.shape)
                 val_preds.append(val_pred)
             lstsq_weights = find_lstsq_weights(val_preds, y_val, num_classes, mode = dataset_info[args.test_dataset]['mode'])
             lstsq_weights = minmax_scale(lstsq_weights)
@@ -287,10 +290,11 @@ def find_lstsq_weights(val_preds, y_val, num_classes, mode):
     val_preds = np.array(val_preds).reshape(len(val_preds), -1)
     val_preds = np.transpose(val_preds)
     if mode == 'classification':
-        y_val_ = np.eye(num_classes)[y_val].reshape(-1)
+        # y_val_ = np.eye(num_classes)[y_val].reshape(-1)
+        y_val_ = y_val.reshape(-1, num_classes)
     else:
         y_val_ = y_val.reshape(-1)
-    
+    print(val_preds.shape, y_val_.shape)
     lstsq_weights = np.linalg.lstsq(val_preds, y_val_)[0]
     # lstsq_weights = nnls(val_preds, y_val_)[0]
     lstsq_weights = np.expand_dims(lstsq_weights, 1)
@@ -375,6 +379,18 @@ class LogisticRegression(nn.Module):
             test_score = 100. * cm.mean()
 
             return test_score
+        
+        elif self.metric == 'mAP':
+            aps_test = []
+            for cls in range(self.num_classes):
+                self.clf.fit(X_train, y_train[:, cls])
+                pred_test = self.clf.decision_function(X_test)
+                ap_test = voc_eval_cls(y_test[:, cls], pred_test)
+                aps_test.append(ap_test)
+
+            mAP_test = 100. * np.mean(aps_test)
+
+            return mAP_test
 
     def get_pred(self, X):
         return self.clf.predict_log_proba(X)
@@ -383,10 +399,17 @@ class LogisticRegression(nn.Module):
         if self.metric == 'accuracy':
             y_pred = y_pred.argmax(1)
             return accuracy_score(y_true, y_pred) * 100.
-        else:
+        elif self.metric == 'mean per-class accuracy':
             cm = confusion_matrix(y_true, y_pred.argmax(1))
             cm = cm.diagonal() / cm.sum(axis=1) 
             return 100. * cm.mean()
+        elif self.metric == 'mAP':
+            aps_test = []
+            for cls in range(self.num_classes):
+                ap_test = voc_eval_cls(y_true[:, cls], y_pred)
+                aps_test.append(ap_test)
+            mAP_test = 100. * np.mean(aps_test)
+            return mAP_test
 
 class LinearRegression(nn.Module):
     def __init__(self, input_dim, output_dim, metric):

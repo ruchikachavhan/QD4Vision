@@ -15,6 +15,8 @@ import numpy as np
 import models
 from torchvision.models import resnet50, ResNet50_Weights
 import torch.nn as nn
+from sklearn.metrics import precision_recall_curve
+from voc2007 import VOC2007
 
 
 # dataset_dict = ['ImageList', 'Office31', 'OfficeHome', "VisDA2017", "OfficeCaltech", "DomainNet", "ImageNetR",
@@ -26,6 +28,11 @@ generator = torch.Generator()
 generator.manual_seed(0)
 
 dataset_info = {
+    'VOC2007': {
+        'class': None, 'dir': 'voc/', 'num_classes': 20,
+        'splits': ['train', 'val', 'test'], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'mAP'
+    },
     'DTD': {
         'class': None, 'dir': 'dtd/', 'num_classes': 47,
         'splits': ['train', 'validation', 'test'], 'split_size': 0.8,
@@ -253,10 +260,17 @@ def get_feature_datasets(args):
                 print("Datasets", len(train_dataset), len(val_dataset), len(test_dataset))
                 
     else:
-        print(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']))
-        train_dataset, val_dataset, test_dataset, num_classes = get_dataset(args.test_dataset, os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), train_transform,
-                                                                    val_transform, args.sample_rate,
-                                                                    args.num_samples_per_classes)
+        if args.test_dataset == 'VOC2007':
+            train_dataset = VOC2007(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 'train', train_transform)
+            val_dataset = VOC2007(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 'val', val_transform)
+            test_dataset = VOC2007(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 'test', val_transform)
+            num_classes = dataset_info[args.test_dataset]['num_classes']
+        else:
+            # Get all other datasets from TLLIB split
+            print(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']))
+            train_dataset, val_dataset, test_dataset, num_classes = get_dataset(args.test_dataset, os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), train_transform,
+                                                                        val_transform, args.sample_rate,
+                                                                        args.num_samples_per_classes)
 
     print("Datasets", len(train_dataset), len(val_dataset), len(test_dataset))
 
@@ -335,6 +349,31 @@ def get_model_features(loader, split, dataset, arch, model, gpu, output_path = '
     all_labels = torch.cat(all_labels)
     torch.save(all_features, save_path + ".pt")
     torch.save(all_labels, save_path + "_labels.pt")
+
+def voc_ap(rec, prec):
+    """
+    average precision calculations for PASCAL VOC 2007 metric, 11-recall-point based AP
+    [precision integrated to recall]
+    :param rec: recall
+    :param prec: precision
+    :return: average precision
+    """
+    ap = 0.
+    for t in np.linspace(0, 1, 11):
+        if np.sum(rec >= t) == 0:
+            p = 0
+        else:
+            p = np.max(prec[rec >= t])
+        ap += p / 11.
+    return ap
+
+def voc_eval_cls(y_true, y_pred):
+    # get precision and recall
+    prec, rec, _ = precision_recall_curve(y_true, y_pred)
+    # compute average precision
+    ap = voc_ap(rec, prec)
+    return ap
+
 
 
 def load_backbone(args):

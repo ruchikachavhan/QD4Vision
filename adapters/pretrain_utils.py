@@ -127,7 +127,7 @@ def evaluate(train_loader, model, criterion, epoch, args):
         diff += get_pairwise_rowdiff(similarity_matrix)
         
 
-        wandb.log({"acc": np.mean(acc1_list), "ce loss": loss})
+        wandb.log({"val acc": np.mean(acc1_list), "val loss": loss})
         ce_losses.update(loss.item()/(k+1), images.size(0))
         top1.update(np.mean(acc1_list), images.size(0))
 

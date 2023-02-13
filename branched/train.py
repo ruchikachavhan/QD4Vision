@@ -470,7 +470,7 @@ def main_worker(gpu, ngpus_per_node, args):
     )
 
 
-    fname  = args.arch + "_" + args.train_data+"-supervised"+ str(args.num_augs) +'_checkpoint_kl_%04d.pth.tar'
+    fname = '%s_%s-supervised%d_checkpoint_kl_%04d.pth.tar'%(args.arch, args.train_data, args.num_augs, args.start_epoch)
     coeff = args.coeff
 
     quality = []

@@ -74,7 +74,9 @@ parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
-parser.add_argument('--model_type', default='adapters', type=str, 
+parser.add_argument('--ad_type', default='series', type=str, 
+                    help='which model type to use')
+parser.add_argument('--ad_form', default='matrix', type=str, 
                     help='which model type to use')
 parser.add_argument('--n-eval-adapters', default=16, type=int, help='Number of adapters per convolution layer')
 parser.add_argument('--num_adapters', default=5, type=int, help='Number of adapters per convolution layer')
@@ -113,7 +115,7 @@ parser.add_argument('--wd', '--weight-decay', default=8e-5, type=float,
                     metavar='W', help='weight decay (default: 1e-6)',
                     dest='weight_decay')
 
-parser.add_argument('--lr-warmup-epochs', default=10, type=int, metavar='N',
+parser.add_argument('--lr-warmup-epochs', default=5, type=int, metavar='N',
                     help='number of warmup epochs')
 
 parser.add_argument("--lr-min", default=0.0, type=float, help="minimum lr of lr schedule (default: 0.0)")
@@ -191,8 +193,9 @@ def main_worker(gpu, ngpus_per_node, args):
     pretrained_state_dict = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2).state_dict()
     # pretrained_state_dict.pop('fc.weight')
     # pretrained_state_dict.pop('fc.bias')
-    model_adapters = create_tsa_resnet(pretrained_state_dict, Bottleneck, [3, 4, 6, 3], True)
-
+    model_adapters = create_tsa_resnet(pretrained_state_dict, Bottleneck, [3, 4, 6, 3], ad_type=args.ad_type, 
+                                    ad_form = args.ad_form, supernet=True)
+    
     ############################### Optimizers and schedulers ###########################
     if args.opt.startswith("sgd"):
         optimizer = torch.optim.SGD(
@@ -313,15 +316,16 @@ def main_worker(gpu, ngpus_per_node, args):
                 checkpoint = torch.load(args.resume, map_location=loc)
             args.start_epoch = checkpoint['epoch'] 
             state_dict = checkpoint['state_dict']
-            for k in list(state_dict.keys()):
-                # retain only base_encoder up to before the embedding layer
-                if k.startswith('module.'):
-                    # remove prefix
-                    state_dict[k[len("module."):]] = state_dict[k]
-                # delete renamed or unused k
-                del state_dict[k]
+            # for k in list(state_dict.keys()):
+            #     # retain only base_encoder up to before the embedding layer
+            #     if k.startswith('module.'):
+            #         # remove prefix
+            #         state_dict[k[len("module."):]] = state_dict[k]
+            #     # delete renamed or unused k
+            #     del state_dict[k]
             
-            model_without_ddp.load_state_dict(state_dict, strict=False)            
+            print(state_dict.keys())
+            model_adapters.load_state_dict(state_dict, strict=False)            
             optimizer.load_state_dict(checkpoint['optimizer'])
             scaler.load_state_dict(checkpoint['scaler'])
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
@@ -363,13 +367,12 @@ def main_worker(gpu, ngpus_per_node, args):
     print("Training and validation data path", traindir, valdir)
     print('Training and validation data size:', len(train_dataset), len(val_dataset))
 
-
-    fname  = "adapters_" + args.arch + "_" + args.train_data+"-supervised"+ str(args.num_augs) +'_checkpoint_%04d.pth.tar'
+    fname = 'adapers_%s_%s_%s_%s-supervised%d_checkpoint_%04d.pth.tar'%(args.arch, args.ad_type, args.ad_form, args.train_data, args.num_augs, args.start_epoch)
     quality = []
     diversity = []
     best_loss = 0.0
 
-    with wandb.init(project="QD ImageNet pretraining with adapters", name=f"experiment_{'QD4v_adapters'}",  config={
+    with wandb.init(project="QD ImageNet pretraining with adapters %s %s"%(args.ad_type, args.ad_form), name=f"experiment_{'QD4v_adapters'}",  config={
         "learning_rate": args.lr,
         "architecture": "R50",
         "dataset": "ImageNet",

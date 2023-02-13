@@ -4,12 +4,10 @@ import torch
 import numpy as np
 
 def enable_grad(module, keep_grad):
-    iter = 0
     for p in module.parameters():
-        keep = True & keep_grad[iter]
+        keep = keep_grad
         # Use bool here - because of an error
         p.requires_grad = bool(keep)
-        iter+=1 
 
 
 def disable_grad(module):
@@ -186,34 +184,72 @@ class ResNet(nn.Module):
         return self._forward_impl(x)
 
 class TSA_Conv2d(nn.Module):
-    def __init__(self, op, num_adapters):
+    def __init__(self, op, num_adapters, ad_type, ad_form):
         # Here num_adapters is the number of adapters per conv 
         super().__init__()
         self.op = copy.deepcopy(op)
+        # ad_type defines what kind of adapter to use: options - residual, series, channel-wise
+        self.ad_type = ad_type
+        self.ad_form = ad_form
         self.num_adapters = num_adapters
-        if op.stride[0] == 2:
-            self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=3, stride= (2, 2), padding=(1,1), bias=False) for _ in range(num_adapters)])
-        else:
-            self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=1, bias=False) for _ in range(num_adapters)])
+        if self.ad_type == 'residual':
+            if self.ad_form == 'matrix':
+                if op.stride[0] == 2:
+                    self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=3, stride= (2, 2), padding=(1,1), bias=True) for _ in range(num_adapters)])
+                else:
+                    self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=1, bias=True) for _ in range(num_adapters)])
+            else:
+                # channelwise
+                self.alpha = nn.ParameterList([nn.Parameter(torch.ones(1, self.op.out_channels, 1, 1)) for _ in range(num_adapters)])
+                self.alpha_bias = nn.ParameterList([nn.Parameter(torch.ones(1, self.op.out_channels, 1, 1)) for _ in range(num_adapters)])
 
-        for i in range(self.num_adapters):
-            nn.init.dirac_(self.alpha[i].weight)
+        elif self.ad_type == 'series':
+            if self.ad_form == 'matrix':
+                self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=1, bias=True) for _ in range(num_adapters)])
+            else:
+                # channelwise
+                self.alpha = nn.ParameterList([nn.Parameter(torch.ones(1, self.op.out_channels, 1, 1)) for _ in range(num_adapters)])
+                self.alpha_bias = nn.ParameterList([nn.Parameter(torch.ones(1, self.op.out_channels, 1, 1)) for _ in range(num_adapters)])
+        
+        if self.ad_form == 'matrix':
+            for i in range(self.num_adapters):
+                nn.init.dirac_(self.alpha[i].weight)
         self.adapt = None
+       
         
     def forward(self, x):
         assert self.adapt is not None  # if it is still None, we forgot to set it
         op_x = self.op(x)
         output = 0.0
+
         for k in range(len(self.alpha)):
             if self.adapt[k]:
-                output += self.alpha[k](x) 
-        return op_x + output
+                if self.ad_type == 'residual':
+                    if self.ad_form == 'matrix':
+                        output += self.alpha[k](x)
+                    else:
+                        output += x * self.alpha[k] + self.alpha_bias[k]
+                elif self.ad_type == 'series':
+                    if self.ad_form == 'matrix':
+                        output += self.alpha[k](op_x)
+                    else:
+                        output += op_x * self.alpha[k] + self.alpha_bias[k]
+
+        if np.all(self.adapt == 0):
+            return op_x
+        else:
+            if self.ad_type == 'residual':
+                return op_x + output
+            elif self.ad_type == 'series':
+                return output
 
 class TSA_ResNet(ResNet):
     def __init__(
         self,
         block,
         layers,
+        ad_type,
+        ad_form,
         num_adapters=5,
         num_classes=1000,
         zero_init_residual=False,
@@ -238,7 +274,7 @@ class TSA_ResNet(ResNet):
             for block in layer:
                 for name, m in block.named_children():
                     if isinstance(m, nn.Conv2d) and m.kernel_size[0] == 3:
-                        setattr(block, name, TSA_Conv2d(m, num_adapters))
+                        setattr(block, name, TSA_Conv2d(m, num_adapters, ad_type, ad_form))
 
     def forward(self, x):
         return super().forward(x)
@@ -266,19 +302,21 @@ class SuperNetSampler(nn.Module):
         for _, m in self.model.named_modules():
             if isinstance(m, TSA_Conv2d):
                 m.adapt = (adapter_configuration[i_conf, :] == 1)
-                bool_adapt = []
-                for i in range(0, len(m.adapt)):
-                    bool_adapt += [m.adapt[i]] * num_parameters(m.alpha[i]) 
-                assert num_parameters(nn.ModuleList(m.alpha)) == len(bool_adapt)
-                enable_grad(nn.ModuleList(m.alpha), bool_adapt)
+                if m.ad_form == 'matrix':
+                    for i in range(0, len(m.adapt)):
+                        enable_grad(m.alpha[i], m.adapt[i])
+                else:
+                    for i in range(0, len(m.adapt)):
+                        m.alpha[i].requires_grad = bool(m.adapt[i])
+                        m.alpha_bias[i].requires_grad = bool(m.adapt[i])
                 i_conf += 1
 
     def forward(self, x):
         return self.model(x)
 
-def create_tsa_resnet(state_dict, block, layers, supernet=True, **kwargs):
+def create_tsa_resnet(state_dict, block, layers, ad_type, ad_form, supernet=True, **kwargs):
     # can optionally pass a state_dict, if ResNet backbone is pre-trained
-    model = TSA_ResNet(block, layers, state_dict=state_dict, **kwargs)
+    model = TSA_ResNet(block, layers, ad_type = ad_type, ad_form = ad_form, state_dict=state_dict, **kwargs)
     if supernet:
         num_adapters = len([n for n, m in model.named_modules() if isinstance(m, TSA_Conv2d)])
         model = SuperNetSampler(model, num_adapters, num_adapters_per_conv=5)
