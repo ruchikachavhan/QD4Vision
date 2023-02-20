@@ -17,7 +17,9 @@ from torchvision.models import resnet50, ResNet50_Weights
 import torch.nn as nn
 from sklearn.metrics import precision_recall_curve
 from voc2007 import VOC2007
-
+from datasets import default_augmentations, tta_augmentations, CropsTransform
+from ood_datasets import ImageList, domain_net_datasets, CIFAR_STL_dataset, breeds_dataset
+from torchvision.datasets import ImageFolder
 
 # dataset_dict = ['ImageList', 'Office31', 'OfficeHome', "VisDA2017", "OfficeCaltech", "DomainNet", "ImageNetR",
 #            "ImageNetSketch", "Aircraft", "cub200", "StanfordCars", "StanfordDogs", "COCO70", "OxfordIIITPets", "PACS",
@@ -39,7 +41,7 @@ dataset_info = {
         'mode': 'classification', 'metric': 'accuracy'
     },
     'Aircraft': {
-        'class': None, 'dir': 'Aircraft', 'num_classes': 10,
+        'class': None, 'dir': 'Aircraft', 'num_classes': 102,
         'splits': ['train', 'val', 'test'], 'split_size': 0.8,
         'mode': 'classification', 'metric': 'mean per-class accuracy'
     },
@@ -69,12 +71,12 @@ dataset_info = {
         'mode': 'classification', 'metric': 'accuracy'
     },
     'OxfordFlowers102': {
-        'class': None, 'dir': 'flowers102-new/flowers/', 'num_classes': 102,
+        'class': None, 'dir': 'flowers/', 'num_classes': 102,
         'splits': ['train', 'validation', 'test'], 'split_size': 0.5,
         'mode': 'classification', 'metric': 'mean per-class accuracy'
     }, 
     'celeba': {
-        'class': CelebA, 'dir': 'CelebA', 'num_classes': 40,
+        'class': CelebA, 'dir': 'CelebA', 'num_classes': 10,
         'splits': ['train', 'valid', 'test'], 'split_size': 0.5,
         'target_type': 'landmarks',
         'mode': 'regression', 'metric': 'r2'
@@ -113,10 +115,45 @@ dataset_info = {
         'class': LeedsSportsPose, 'dir': 'LeedsSportsPose', 'num_classes': 28,
         'splits': ['train', 'test'], 'split_size': 0.8,
         'mode': 'regression', 'metric': 'r2'
+    },
+    'domainnet': {
+        'class': None, 'dir': 'domainnet', 'num_classes': 40,
+        'splits': [], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'accuracy'
+    },
+    'cifarstl': {
+        'class': None, 'dir': 'domainnet', 'num_classes': 10,
+        'splits': [], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'accuracy'
+    },
+    'imagenet-a': {
+        'class': None, 'dir': 'domainnet', 'num_classes': 200,
+        'splits': [], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'accuracy'
+    },
+    'imagenet-r': {
+        'class': None, 'dir': 'domainnet', 'num_classes': 200,
+        'splits': [], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'accuracy'
+    },
+    'imagenet-sketch': {
+        'class': None, 'dir': 'domainnet', 'num_classes': 1000,
+        'splits': [], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'accuracy'
+    },
+    'living17': {
+        'class': None, 'dir': 'domainnet', 'num_classes': 17,
+        'splits': [], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'accuracy'
+    },
+    'entity30': {
+        'class': None, 'dir': 'domainnet', 'num_classes': 30,
+        'splits': [], 'split_size': 0.8,
+        'mode': 'classification', 'metric': 'accuracy'
     }
 }
 
-def get_dataset(dataset_name, root, train_transform, val_transform, sample_rate=100, num_samples_per_classes=None):
+def get_dataset(dataset_name, root, train_transform, val_transform, sample_rate=100, num_samples_per_classes=None, test_transform=None):
     """
     When sample_rate < 100,  e.g. sample_rate = 50, use 50% data to train the model.
     Otherwise,
@@ -144,7 +181,10 @@ def get_dataset(dataset_name, root, train_transform, val_transform, sample_rate=
             train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, len(train_dataset) - train_size],
                                                 generator = generator)
 
-        test_dataset = dataset(root=root, split='test', download=False, transform=val_transform)
+        if test_transform is None:
+            test_dataset = dataset(root=root, split='test', download=False, transform=val_transform)
+        else:
+            test_dataset = dataset(root=root, split='test', download=False, transform=test_transform)
         
 
     return train_dataset, val_dataset, test_dataset, num_classes
@@ -224,8 +264,105 @@ def get_val_transform(resizing='default'):
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
+def get_tta_dataset(args):
+    # train_transform = T.Compose(default_augmentations)
+    train_transform = get_val_transform()
+    val_transform = CropsTransform(tta_augmentations)
+    
+    if dataset_info[args.test_dataset]['mode'] in ['regression', 'pose_estimation'] or args.test_dataset == 'aloi':
+        num_classes = dataset_info[args.test_dataset]['num_classes']
+        # if no splilt is given, then divide training data into train and val
+        if len(dataset_info[args.test_dataset]['splits']) == 0:
+            train_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir'])
+                                                ,transform = train_transform)
+            test_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir'])
+                                                ,transform = val_transform)
+            num_train = len(train_dataset)
+            indices = list(range(num_train))
+            split = int(np.floor(0.6 * num_train))
+            split1 = int(np.floor(0.8 * num_train))
+        
+            train_idx, valid_idx, test_idx = indices[:split], indices[split:split1], indices[split1:]
+            train_sampler = SubsetRandomSampler(train_idx)
+            valid_sampler = SubsetRandomSampler(valid_idx)
+            test_sampler = SubsetRandomSampler(test_idx)
+        else:
+            # If split is given, use the split to make dataloaders
+            train_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
+                                split = 'train', transform = train_transform)
+            if len(dataset_info[args.test_dataset]['splits']) == 3:
+                val_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
+                                split = dataset_info[args.test_dataset]['splits'][1], transform = train_transform)
+                test_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
+                                split = dataset_info[args.test_dataset]['splits'][2], transform = val_transform)
+                train_sampler = None
+                valid_sampler = None
+                test_sampler = None
+            elif(len(dataset_info[args.test_dataset]['splits'])) == 2: 
+                # only contains train and val splits
+                # train_size = int(len(train_dataset)* dataset_info[args.test_dataset]['split_size'])
+                test_dataset = dataset_info[args.test_dataset]['class'](os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 
+                                split = 'test', transform = val_transform)
+                num_train = len(train_dataset)
+                indices = list(range(num_train))
+                split = int(np.floor(0.8 * num_train))
+            
+                train_idx, valid_idx = indices[:split], indices[split:]
+                train_sampler = SubsetRandomSampler(train_idx)
+                valid_sampler = SubsetRandomSampler(valid_idx)
+                test_sampler = None
+                
+        print("Datasets", len(train_dataset), len(test_dataset))
 
-def get_feature_datasets(args): 
+        if train_sampler is not None and valid_sampler is not None:
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+                                num_workers=args.workers, drop_last=False, sampler=train_sampler)
+            val_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+                                num_workers=args.workers, drop_last=False, sampler=valid_sampler)
+            if test_sampler is not None:
+                test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+                                    num_workers=args.workers, drop_last=False, sampler=test_sampler)
+            else:
+                test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
+                                    num_workers=args.workers, drop_last=False)
+            trainval_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+        else:
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+                                num_workers=args.workers, drop_last=False)
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
+                                num_workers=args.workers, drop_last=False)
+            test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.workers, drop_last=False)
+            trainval_dataset = torch.utils.data.ConcatDataset([train_dataset, val_dataset])
+            trainval_loader = DataLoader(trainval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+
+
+    else:
+        if args.test_dataset == 'VOC2007':
+            train_dataset = VOC2007(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 'train', train_transform)
+            val_dataset = VOC2007(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 'val', train_transform)
+            test_dataset = VOC2007(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), 'test', val_transform)
+            num_classes = dataset_info[args.test_dataset]['num_classes']
+        else:
+            # Get all other datasets from TLLIB split
+            print(os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']))
+            train_dataset, val_dataset, test_dataset, num_classes = get_dataset(args.test_dataset, os.path.join(args.data_root, dataset_info[args.test_dataset]['dir']), train_transform,
+                                                                        train_transform, args.sample_rate,
+                                                                        args.num_samples_per_classes, test_transform=val_transform)
+
+        print("Datasets", len(train_dataset), len(val_dataset), len(test_dataset))
+
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                                num_workers=args.workers, drop_last=False)
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+
+        trainval_dataset = torch.utils.data.ConcatDataset([train_dataset, val_dataset])
+        trainval_loader = DataLoader(trainval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+
+    return train_loader, val_loader, trainval_loader, test_loader, num_classes
+
+
+def get_feature_datasets(args, tta = False):
     train_transform = get_train_transform(args.train_resizing, not args.no_hflip, args.color_jitter)
     val_transform = get_val_transform(args.val_resizing)
 
@@ -282,6 +419,45 @@ def get_feature_datasets(args):
     trainval_dataset = torch.utils.data.ConcatDataset([train_dataset, val_dataset])
     trainval_loader = DataLoader(trainval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
 
+    return train_loader, val_loader, trainval_loader, test_loader, num_classes
+
+def get_feature_datasets_ood(args):
+    print(args.test_dataset)
+    if args.test_dataset == 'domainnet':
+        source_train, source_test, target, num_classes = domain_net_datasets(args.data_root)
+    elif args.test_dataset == 'cifarstl':
+        source_train, source_test, target, num_classes = CIFAR_STL_dataset(args.data_root)
+
+    elif args.test_dataset in ['living17', 'entity30']:
+        source_train, source_test, target, num_classes = breeds_dataset(root='../../imagenet1k', 
+                        info_dir = os.path.join(args.data_root, 'breeds'), dataset_name = args.test_dataset)
+
+    elif args.test_dataset in ['imagenet-a', 'imagenet-r']:
+        source_train = ImageFolder(os.path.join(args.data_root, args.test_dataset), transform = get_train_transform())
+        data_size = len(source_train)
+        train_size = int(data_size*0.6)
+        val_size = (data_size - train_size)//2
+        test_size = data_size - train_size - val_size
+        num_classes = 200
+        source_train, source_test, target = torch.utils.data.random_split(source_train, [train_size, val_size, test_size], 
+                                                                    generator = generator)
+    elif args.test_dataset in ['imagenet-sketch']:
+        source_train = ImageFolder(os.path.join(args.data_root, args.test_dataset, 'sketch'), transform = get_train_transform())
+        data_size = len(source_train)
+        train_size = int(data_size*0.6)
+        val_size = (data_size - train_size)//2
+        test_size = data_size - train_size - val_size
+        num_classes = 1000
+        source_train, source_test, target = torch.utils.data.random_split(source_train, [train_size, val_size, test_size], 
+                                                                    generator = generator)
+    
+    trainval_dataset = torch.utils.data.ConcatDataset([source_train, source_test])
+    train_loader = DataLoader(source_train, batch_size=args.batch_size, shuffle=True,
+                            num_workers=args.workers, drop_last=False)
+    val_loader = DataLoader(source_test, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+    test_loader = DataLoader(target, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
+
+    trainval_loader = DataLoader(trainval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
     return train_loader, val_loader, trainval_loader, test_loader, num_classes
 
 def standardize(data):

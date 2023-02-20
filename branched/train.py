@@ -6,7 +6,7 @@ import time
 import shutil
 import warnings
 import random
-
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,15 +25,14 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import torchvision
 import models
-import adapter_models
 import datasets
-from pretrain_utils import train, evaluate, save_checkpoint, RunningStats, adjust_coeff, adjust_learning_rate, get_pairwise_rowdiff, EarlyStopping, ExponentialMovingAverage, RandomCutmix, RandomMixup
+from pretrain_utils import train, evaluate, save_checkpoint, adjust_coeff, adjust_learning_rate, get_pairwise_rowdiff, EarlyStopping, ExponentialMovingAverage, RandomCutmix, RandomMixup
 import json
 import wandb
 from sampler import RASampler
 import presets
 from torchvision.transforms.functional import InterpolationMode
-
+from adapter_resnet import TSA_ResNet, TSABottleneck
 # python train.py --multiprocessing-distributed --rank 0 --world-size 1 --dist-url "tcp://localhost:10001" --train_data imagenet1k --data /raid/imagenet1k/ --num_augs 6 --batch-size 1024 
 # --lr 0.5 --lr-scheduler cosineannealinglr --lr-warmup-epochs 5 --lr-warmup-method linear --lr-warmup-decay 0.01 --wd 2e-5 --mixup --cutmix --model-ema
 # Models and arguments
@@ -82,9 +81,11 @@ parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
-parser.add_argument('--model_type', default='branch', type=str, 
+parser.add_argument('--model-type', default='branch', type=str, 
                     help='which model type to use')
 parser.add_argument('--num_encoders', default=5, type=int, help='Number of encoders')
+parser.add_argument('--num_adapters', default=8, type=int, help='Number of adapters')
+parser.add_argument('--sampled_adapters', default=2, type=int, help='Number of adapters')
 parser.add_argument('--num_augs', default=6, type=int, help='Number of encoders')
 parser.add_argument('--coeff', default=0.2, type=float, help='')
 parser.add_argument('--kl_coeff', default=0.1, type=float, help='')
@@ -135,7 +136,8 @@ parser.add_argument("--lr-warmup-method", default="constant", type=str, help="th
 parser.add_argument("--model-ema", action="store_true", help="enable tracking Exponential Moving Average of model parameters")
 parser.add_argument("--model-ema-steps", type=int, default=32, help="the number of iterations that controls how often to update the EMA model (default: 32)",)
 parser.add_argument("--model-ema-decay", type=float, default=0.99998, help="decay factor for Exponential Moving Average of model parameters (default: 0.99998)",)
-
+parser.add_argument('--no-scheduler', action='store_false',
+                    help='DO not use scheduler if false')
 
 def main():
     args = parser.parse_args()
@@ -160,7 +162,8 @@ def main():
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node = torch.cuda.device_count()
+    ngpus_per_node = 6
+    # torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -185,7 +188,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
 
-    if args.distributed:
+    if args.distributed: 
         if args.dist_url == "env://" and args.rank == -1:
             args.rank = int(os.environ["RANK"])
         if args.multiprocessing_distributed:
@@ -207,13 +210,20 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.train_data == 'imagenet1k':
         args.num_classes = 1000
 
-    if args.model_type == 'branch':
+    if args.model_type == 'branched':
         if args.arch == 'resnet50':
             models_ensemble = models.BranchedResNet(N = args.num_encoders, num_classes = args.num_classes, arch = args.arch)
         elif args.arch == 'convnext':
             models_ensemble = models.DiverseConvNext(N = args.num_encoders, num_classes = args.num_classes)
     elif args.model_type == 'adapters':
-        models_ensemble = adapter_models.ResNet50(num_classes = args.num_classes, num_tasks=args.num_encoders)
+        print('series')
+        # model along with fc layers is initialised with imagenet_v2 weights
+        models_ensemble = TSA_ResNet(TSABottleneck, [3, 4, 6, 3], 'series', 'matrix', args.num_adapters,  args.sampled_adapters)
+        # We need to change number of encoders to number of sampled adapters, this is to support train function in pretrain_utils
+        args.num_encoders = args.sampled_adapters
+        for name, param in models_ensemble.named_parameters():
+            if 'alpha' not in name and 'fc' not in name:
+                param.requires_grad = False 
 
     ############################### Optimizers and schedulers ###########################
     if args.opt.startswith("sgd"):
@@ -229,7 +239,7 @@ def main_worker(gpu, ngpus_per_node, args):
             models_ensemble.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, eps=0.0316, alpha=0.9
         )
     elif args.opt == "adamw":
-        optimizer = torch.optim.AdamW(models_ensemble.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = torch.optim.Adadelta(models_ensemble.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:
         raise RuntimeError(f"Invalid optimizer {args.opt}. Only SGD, RMSprop and AdamW are supported.")
 
@@ -292,7 +302,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / args.world_size)
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            find_unused = False 
+            find_unused = True 
             models_ensemble = torch.nn.parallel.DistributedDataParallel(models_ensemble, device_ids=[args.gpu], find_unused_parameters=find_unused)
         else:
             models_ensemble.cuda()
@@ -307,11 +317,14 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         # AllGather/rank implementation in this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
-    print(models_ensemble) # print model after SyncBatchNorm
+    # print(models_ensemble) # print model after SyncBatchNorm
 
    ############################# Exponenetial moving average #############################
-    model_without_ddp = models_ensemble.module
     if args.model_ema:
+        if args.distributed:
+            model_without_ddp = models_ensemble.module
+        else:
+            model_without_ddp = copy.deepcopy(models_ensemble)
         # Decay adjustment that aims to keep the decay independent of other hyper-parameters originally proposed at:
         # https://github.com/facebookresearch/pycls/blob/f8cd9627/pycls/core/net.py#L123
         #
@@ -322,6 +335,8 @@ def main_worker(gpu, ngpus_per_node, args):
         alpha = 1.0 - args.model_ema_decay
         alpha = min(1.0, alpha * adjust)
         model_ema = ExponentialMovingAverage(model_without_ddp, device=torch.device(args.gpu), decay=1.0 - alpha)
+    else:
+        model_ema = None
 
     # optionally resume from a checkpoint, only for ensemble model
     if args.resume:
@@ -412,9 +427,9 @@ def main_worker(gpu, ngpus_per_node, args):
             #     return mixupcutmix(*default_collate(batch))
 
         train_dataset = torchvision.datasets.ImageFolder(traindir,
-                    datasets.CropsTransform(augs_list, args.num_augs))
+                    datasets.CropsTransform(augs_list))
         val_dataset = torchvision.datasets.ImageFolder(valdir,
-                    datasets.CropsTransform(augs_list, args.num_augs))
+                    datasets.CropsTransform(augs_list))
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -435,42 +450,42 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Training data for supervised loss function
     # This data loader applies, mixup, cutmix, auto_augment, repeated augmentation to images 
-    interpolation = InterpolationMode(args.interpolation)
+    # interpolation = InterpolationMode(args.interpolation)
 
-    auto_augment_policy = getattr(args, "auto_augment", None)
-    random_erase_prob = getattr(args, "random_erase", 0.0)
-    ra_magnitude = args.ra_magnitude
-    augmix_severity = args.augmix_severity
-    supervised_dataset = torchvision.datasets.ImageFolder(
-        traindir,
-        presets.ClassificationPresetTrain(
-            crop_size=224,
-            interpolation=interpolation,
-            auto_augment_policy=auto_augment_policy,
-            random_erase_prob=random_erase_prob,
-            ra_magnitude=ra_magnitude,
-            augmix_severity=augmix_severity,
-        ),
-    )
+    # auto_augment_policy = getattr(args, "auto_augment", None)
+    # random_erase_prob = getattr(args, "random_erase", 0.0)
+    # ra_magnitude = args.ra_magnitude
+    # augmix_severity = args.augmix_severity
+    # supervised_dataset = torchvision.datasets.ImageFolder(
+    #     traindir,
+    #     presets.ClassificationPresetTrain(
+    #         crop_size=224,
+    #         interpolation=interpolation,
+    #         auto_augment_policy=auto_augment_policy,
+    #         random_erase_prob=random_erase_prob,
+    #         ra_magnitude=ra_magnitude,
+    #         augmix_severity=augmix_severity,
+    #     ),
+    # )
 
-    if args.distributed:
-        if hasattr(args, "ra_sampler") and args.ra_sampler:
-            sup_train_sampler = RASampler(supervised_dataset, shuffle=True, repetitions=args.ra_reps)
-        else:
-            sup_train_sampler = torch.utils.data.distributed.DistributedSampler(supervised_dataset)
-    else:
-        sup_train_sampler = torch.utils.data.RandomSampler(supervised_dataset)
+    # if args.distributed:
+    #     if hasattr(args, "ra_sampler") and args.ra_sampler:
+    #         sup_train_sampler = RASampler(supervised_dataset, shuffle=True, repetitions=args.ra_reps)
+    #     else:
+    #         sup_train_sampler = torch.utils.data.distributed.DistributedSampler(supervised_dataset)
+    # else:
+    #     sup_train_sampler = torch.utils.data.RandomSampler(supervised_dataset)
 
-    sup_data_loader = torch.utils.data.DataLoader(
-        supervised_dataset,
-        batch_size=args.batch_size,
-        sampler=sup_train_sampler,
-        num_workers=args.workers,
-        pin_memory=True,
-    )
+    # sup_data_loader = torch.utils.data.DataLoader(
+    #     supervised_dataset,
+    #     batch_size=args.batch_size,
+    #     sampler=sup_train_sampler,
+    #     num_workers=args.workers,
+    #     pin_memory=True,
+    # )
 
 
-    fname = '%s_%s-supervised%d_checkpoint_kl_%04d.pth.tar'%(args.arch, args.train_data, args.num_augs, args.start_epoch)
+    fname = '%s_%s_%s-supervised%d_checkpoint_kl_%04d.pth.tar'%(args.arch, args.train_data, args.model_type, args.num_augs, args.epochs)
     coeff = args.coeff
 
     quality = []
@@ -487,22 +502,21 @@ def main_worker(gpu, ngpus_per_node, args):
         for epoch in range(args.start_epoch, args.epochs):
             if args.distributed:
                 train_sampler.set_epoch(epoch)
-                sup_train_sampler.set_epoch(epoch)
+                # sup_train_sampler.set_epoch(epoch)
             
-            # Two instances of running stats: first one for mean feature and second one for covariance matrix
-            running_mean = [RunningStats() for i in range(0, 2)] 
-
-            train_avg_sim, train_acc1, train_acc5, train_loss = train(train_loader, sup_data_loader, models_ensemble, criterion, 
-                                optimizer, scaler, model_ema, mixupcutmix, epoch, args, running_mean, coeff, args.kl_coeff)
-            lr_scheduler.step()
+            train_avg_sim, train_acc1, train_acc5, train_loss = train(train_loader, models_ensemble, criterion, 
+                                optimizer, scaler, model_ema, mixupcutmix, epoch, args, coeff, args.kl_coeff)
+            if args.no_scheduler:
+                lr_scheduler.step()
             test_acc1, test_acc5, val_loss, val_avg_sim = evaluate(val_loader, models_ensemble, criterion, epoch, args)
             if args.model_ema:
                 print(" ----------- EMA Testing ------------")
                 test_acc1_ema, test_acc5_ema, val_loss_ema, val_avg_sim_ema = evaluate(val_loader, model_ema, criterion, epoch, args)
+                print("Test Accuracies of all backbones with EMA", test_acc1_ema, test_acc5_ema)
 
             print("Training Accuracies of all backbones", train_acc1, train_acc5)
             print("Test Accuracies of all backbones", test_acc1, test_acc5)
-            print("Test Accuracies of all backbones with EMA", test_ac§c1_ema, test_acc5_ema)
+            
             print("Train sim", train_avg_sim)
             print("Val sim", val_avg_sim, coeff)
 
@@ -513,15 +527,15 @@ def main_worker(gpu, ngpus_per_node, args):
             with open(args.train_data + args.arch + "_" +  '_log_qd.json', "w") as f:
                 json.dump(dict, f)
             
-            np.save('train' + "_" +  args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_augs.npy", train_avg_sim.detach().cpu().numpy())
-            np.save("val" + "_" + args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_augs.npy", val_avg_sim.detach().cpu().numpy())
+            np.save('train' + "_" + args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_%s_augs.npy"%args.model_type, train_avg_sim.detach().cpu().numpy())
+            np.save("val" + "_" + args.train_data+ "_similarity_matrix_"+ str(args.num_augs)+ "_KL_%s_augs.npy"%args.model_type, val_avg_sim.detach().cpu().numpy())
 
             if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                     and args.rank == 0): # only the first GPU saves checkpoint
                 
                 if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                     and args.rank == 0): # only the first GPU saves checkpoint
-                    print("Saving checkpoint in", os.path.join(args.output_dir, fname % args.epochs))
+                    print("Saving checkpoint in", os.path.join(args.output_dir, fname))
                     save_checkpoint({
                         'epoch': epoch + 1,
                         'arch': args.arch,
@@ -529,8 +543,8 @@ def main_worker(gpu, ngpus_per_node, args):
                         'optimizer' : optimizer.state_dict(),
                         "lr_scheduler": lr_scheduler.state_dict(),
                         'scaler': scaler.state_dict(),
-                        'model_ema': model_ema.state_dict(),
-                    }, is_best=False, filename=os.path.join(args.output_dir, fname % args.epochs))
+                        # 'model_ema': model_ema.state_dict(),
+                    }, is_best=False, filename=os.path.join(args.output_dir, fname))
 
 
 if __name__ == '__main__':

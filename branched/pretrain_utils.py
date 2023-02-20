@@ -13,7 +13,7 @@ from torch import Tensor
 from torchvision.transforms import functional as FT
 import wandb
 
-def train(train_loader, sup_train_loader, models_ensemble, criterion, optimizer, scaler, model_ema, mixupcutmix, epoch, args, running_mean, coeff, kl_coeff):
+def train(train_loader, models_ensemble, criterion, optimizer, scaler, model_ema, mixupcutmix, epoch, args, coeff, kl_coeff):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     learning_rates = AverageMeter('LR', ':.4e')
@@ -30,23 +30,28 @@ def train(train_loader, sup_train_loader, models_ensemble, criterion, optimizer,
     models_ensemble.train()
     end = time.time()
     avg_sim = 0.0
+
+    if args.model_type == "adapters":
+        avg_sim = torch.zeros((args.num_adapters, args.num_augs))
+        iter_adapts = np.zeros(args.num_adapters)
+
     iters_per_epoch = len(train_loader)
     acc1_list, acc5_list = np.zeros(args.num_encoders), np.zeros(args.num_encoders)
 
     iters_per_epoch = len(train_loader)
     
     kl_loss = torch.nn.KLDivLoss(reduction = "batchmean")
-    for iter, data in enumerate(zip(train_loader, sup_train_loader)):
-        images, labels = data[0][0], data[0][1]
-        sup_images, sup_labels = data[1][0], data[1][1]
+    for iter, data in enumerate(train_loader):
+        images, labels = data[0], data[1]
+        # sup_images, sup_labels = data[1][0], data[1][1]
         data_time.update(time.time() - end)
         learning_rates.update(optimizer.param_groups[0]['lr'])
         if args.gpu is not None:
             # Size of images is args.batch_size * (args.num_augs + 1)
             images = images.reshape(-1, 3, datasets.img_size, datasets.img_size).cuda(args.gpu, non_blocking=True) 
             labels = labels.cuda(args.gpu, non_blocking=True)
-            sup_images = sup_images.cuda(args.gpu, non_blocking=True)
-            sup_labels = sup_labels.cuda(args.gpu, non_blocking=True)
+            # sup_images = sup_images.cuda(args.gpu, non_blocking=True)
+            # sup_labels = sup_labels.cuda(args.gpu, non_blocking=True)
 
         images = get_aug_wise_images(images, args)
         # sup_images, sup_labels = mixupcutmix(sup_images, sup_labels)
@@ -58,14 +63,20 @@ def train(train_loader, sup_train_loader, models_ensemble, criterion, optimizer,
             orig_image_logits = logits[:, args.batch_size*args.num_augs:, :]
 
             # orig image logits and feats is of shape -  [args.num_encoders+1, .....], where last element corresponds to output of baseline model which is frozen
-            ce_loss = get_loss(criterion, orig_image_logits[:-1], sup_labels)
+            ce_loss = get_loss(criterion, orig_image_logits[:-1], labels)
             # Adding KL divergence loss between baseline and models_ensemble predictions
             kl_div = get_kl_loss(orig_image_logits[:-1], orig_image_logits[-1], kl_loss,  T=6, alpha=args.kl_coeff)
 
-            similarity_matrix = get_similarity_vector(feats[:-1], args, running_mean)
+            similarity_matrix = get_similarity_vector(feats[:-1], args)
             diff = get_pairwise_rowdiff(similarity_matrix).sum()
             loss =  (1 - kl_coeff) * ce_loss + coeff * diff + kl_div
-            avg_sim += similarity_matrix.cpu().detach()
+
+            if args.model_type == "branched":
+                avg_sim += similarity_matrix.cpu().detach()
+            else:
+                selected_ids = models_ensemble.select_adapter_idx
+                avg_sim[selected_ids[:-1]] += similarity_matrix.cpu().detach()
+                iter_adapts[selected_ids[:-1]] += 1
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -81,7 +92,7 @@ def train(train_loader, sup_train_loader, models_ensemble, criterion, optimizer,
 
         acc1, acc5 = [], []
         for i in range(0, args.num_encoders):
-            a1, a5 = accuracy(orig_image_logits[i], sup_labels, topk=(1, 5))
+            a1, a5 = accuracy(orig_image_logits[i], labels, topk=(1, 5))
             acc1.append(a1.item())
             acc5.append(a5.item())
             acc1_list[i] += a1.item()
@@ -90,21 +101,29 @@ def train(train_loader, sup_train_loader, models_ensemble, criterion, optimizer,
         acc5 = np.mean(acc5)
 
         wandb.log({"acc": acc1, "ce loss": ce_loss, "diff": diff})
-        ce_losses.update(ce_loss.item(), sup_images.size(0))
-        variance.update(diff.item(), sup_images.size(0))
-        kl.update(kl_div.item(), sup_images.size(0))
-        top1.update(acc1, sup_images.size(0))
-        top5.update(acc5, sup_images.size(0))
+        ce_losses.update(ce_loss.item(), images.size(0)//(args.num_augs+1))
+        variance.update(diff.item(), images.size(0)//(args.num_augs+1))
+        kl.update(kl_div.item(), images.size(0)//(args.num_augs+1))
+        top1.update(acc1, images.size(0)//(args.num_augs+1))
+        top5.update(acc5, images.size(0)//(args.num_augs+1))
     
         batch_time.update(time.time() - end)
         end = time.time()
         # torch.cuda.empty_cache()
         if iter % args.print_freq == 0:
             progress.display(iter)
+            if args.model_type == "adapters":
+                print("Models selected", models_ensemble.select_adapter_idx)
+                for j in range(args.num_adapters):
+                    print(avg_sim[j]/(iter_adapts[j]))
 
-    acc1_list /= (iter+1)
-    acc5_list /= (iter+1)
-    avg_sim /= (iter+1)
+    acc1_list /= (iter)
+    acc5_list /= (iter)
+    if args.model_type == "branched":
+        avg_sim /= (iter)
+    else:
+        for k in range(args.num_adapters):
+            avg_sim[k] /= (iter_adapts[k])
 
     torch.cuda.empty_cache()
    
@@ -145,7 +164,10 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
         images = get_aug_wise_images(images, args)
         with torch.no_grad():
             with torch.cuda.amp.autocast(False):
-                logits, feats = models_ensemble(images) # Pass the un-augmented image
+                if args.model_type == "branched":
+                    logits, feats = models_ensemble(images) # Pass the un-augmented image
+                else:
+                    logits, feats = models_ensemble(images, select=False)
                 # Last 'batch_size' images are unaugmented, there are (num_augs+1)*args.batch_size number of images in one batch
                 orig_image_logits = logits[:, args.batch_size * args.num_augs:, :]
                 orig_image_feats = feats[:, args.batch_size * args.num_augs:, :]
@@ -173,14 +195,17 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
         # torch.cuda.empty_cache()
         if iter % args.print_freq == 0:
             progress.display(iter)
-
+            
     print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
 
     acc1_list /= (iter+1)
     acc5_list /= (iter+1)
     all_orig_feats = torch.cat(orig_feats_list, dim = 1)
-    sim = torch.zeros((args.num_encoders + 1, args.num_augs))
+    if args.model_type == "branched":
+        sim = torch.zeros((args.num_encoders + 1, args.num_augs))
+    else:
+        sim = torch.zeros((args.num_adapters, args.num_augs))
     
     for i in range(0, args.num_augs):
         all_aug_feats = all_feats_list[i]
@@ -228,12 +253,12 @@ def get_loss(criterion, logits, labels):
 
 def get_pairwise_rowdiff(sim_matrix, criterion = torch.nn.L1Loss()):
     diff = 0.0
-    for i in range(0, sim_matrix.shape[0]):
+    for i in range(0, sim_matrix.shape[0]-1):
         for j in range(i+1, sim_matrix.shape[0]):
             diff += torch.exp(-criterion(sim_matrix[i], sim_matrix[j]))
     return diff
 
-def get_similarity_vector(feats, args, running_mean):
+def get_similarity_vector(feats, args):
     # returns N vectors of R^k, each element being the similarity between original and augmented image
     sim = torch.zeros((args.num_encoders, args.num_augs)).cuda(args.gpu)
 

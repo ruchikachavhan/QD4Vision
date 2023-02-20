@@ -92,7 +92,7 @@ parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--gpu', default=None, type=int,
+parser.add_argument('--gpu', default=4, type=int,
                     help='GPU id to use.')
 parser.add_argument('--multiprocessing-distributed', action='store_true',
                     help='Use multi-processing distributed training to launch '
@@ -102,7 +102,9 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 parser.add_argument('--warmup-epochs', default=10, type=int, metavar='N',
                     help='number of warmup epochs')
 parser.add_argument('--baseline', action='store_true', help="Use pretrained or QD model")
-parser.add_argument('--test_dataset', default='cifar10', type=str)
+parser.add_argument('--test_mode', default='id', type=str, help="Use pretrained or QD model")
+
+parser.add_argument('--test_dataset', default='VOC2007', type=str)
 parser.add_argument('--data_root', default='/raid/s2265822/TestDatasets/', type = str)
 parser.add_argument('--num_encoders', default=5, type=int, help='Number of encoders')
 
@@ -138,8 +140,10 @@ def main_worker(config=None):
 
     models_ensemble = load_backbone(args)
         
-    train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets(args)
-    # train_images, train_labels, val_images, val_labels, test_images, test_labels = train_images.cpu(), train_labels.cpu(), val_images.cpu(), val_labels.cpu(), test_images.cpu(), test_labels.cpu()
+    if args.test_mode == 'id':
+        train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets(args)
+    elif args.test_mode == 'ood':
+        train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets_ood(args)
 
     X_train_feature, y_train, X_val_feature, y_val = get_features(
         train_loader, val_loader, models_ensemble, device = args.gpu, baseline = args.baseline, 
@@ -185,7 +189,6 @@ def main_worker(config=None):
     else:
         wd_range = torch.logspace(-6, 5, 45)
 
-    print(y_val.shape)
     if not args.baseline:
         best_params = {}
         best_score = np.zeros(args.num_encoders + 1)
@@ -194,8 +197,7 @@ def main_worker(config=None):
             results_file = open(os.path.join("results", args.test_dataset + "_stacking.json"), 'w')
         else:
             results_file = open(os.path.join("results", args.test_dataset + ".json"), 'w')
-        # for k in range(0, args.num_encoders+1):
-        for k in range(0, 2):
+        for k in range(0, args.num_encoders+1):
             for wd in tqdm(wd_range, desc='Selecting best ridge hyperparameters for classifier' + str(k)):
                 clf[k], C = set_params(clf[k], wd, dataset_info[args.test_dataset]['mode'])
                 val_acc = clf[k].fit_regression(X_train_feature[k], y_train, X_val_feature[k], y_val)
@@ -212,14 +214,26 @@ def main_worker(config=None):
             print("----------------- Linear combination search ---------------")
             # Using best regulariser find linear combination weights using the val set
             val_preds = []
-            # for k in range(0, args.num_encoders+1):
-            for k in range(0, 2):
+            for k in range(0, args.num_encoders+1):
                 clf[k], _ = set_params(clf[k], torch.tensor(best_params[str(k)]), dataset_info[args.test_dataset]['mode'])
-                val_pred = clf[k].get_pred(X_val_feature[k])
-                print(val_pred.shape)
+                if args.test_dataset == 'VOC2007':
+                    val_pred = clf[k].get_pred(X_val_feature[k], X_train_feature[k], y_train)
+                else:
+                    val_pred = clf[k].get_pred(X_val_feature[k])
                 val_preds.append(val_pred)
-            lstsq_weights = find_lstsq_weights(val_preds, y_val, num_classes, mode = dataset_info[args.test_dataset]['mode'])
-            lstsq_weights = minmax_scale(lstsq_weights)
+            
+            val_preds = np.array(val_preds)
+            if args.test_dataset == 'VOC2007':
+                all_weights = []
+                for cls in range(dataset_info[args.test_dataset]['num_classes']):
+                    w = find_lstsq_weights(val_preds[:, :, cls], y_val[:, cls], num_classes, mode = dataset_info[args.test_dataset]['mode'], cls = cls)
+                    w = minmax_scale(w)
+                    all_weights.append(w)
+                lstsq_weights = np.array(all_weights)
+            else:
+                lstsq_weights = find_lstsq_weights(val_preds, y_val, num_classes, mode = dataset_info[args.test_dataset]['mode'])
+                # lstsq_weights = minmax_scale(lstsq_weights)
+                lstsq_weights = softmax(lstsq_weights)
             all_results['weights'] = lstsq_weights.tolist()
             print(lstsq_weights)
 
@@ -229,7 +243,10 @@ def main_worker(config=None):
         for k in range(0, args.num_encoders+1):
             clf[k], _ = set_params(clf[k], torch.tensor(best_params[str(k)]), dataset_info[args.test_dataset]['mode'])
             test_acc = clf[k].fit_regression(X_trainval_feature[k], y_trainval, X_test_feature[k], y_test)
-            test_pred = clf[k].get_pred(X_test_feature[k])
+            if args.test_dataset == 'VOC2007':
+                test_pred = clf[k].get_pred(X_test_feature[k], X_trainval_feature[k], y_trainval)
+            else:
+                test_pred = clf[k].get_pred(X_test_feature[k])
             test_preds.append(test_pred)
             test_accuracies.append(test_acc)
         
@@ -238,9 +255,16 @@ def main_worker(config=None):
 
         if not args.stacking:
             test_preds = np.array(test_preds)
-            test_preds = np.swapaxes(test_preds, 0, 2)
-            weighted_preds = np.matmul(test_preds, lstsq_weights).squeeze(2)
-            weighted_preds = np.transpose(weighted_preds)/sum(lstsq_weights)
+            if args.test_dataset == 'VOC2007':
+                test_preds = np.transpose(test_preds, (2, 1, 0))
+                lstsq_weights = lstsq_weights.squeeze(2)
+                weighted_preds = (test_preds @ lstsq_weights[..., np.newaxis])[..., 0]
+                weighted_preds = np.transpose(weighted_preds)/np.sum(lstsq_weights)
+            else:          
+                test_preds = np.swapaxes(test_preds, 0, 2)
+                weighted_preds = np.matmul(test_preds, lstsq_weights).squeeze(2)
+                weighted_preds = np.transpose(weighted_preds)/sum(lstsq_weights)
+            
             test_acc = clf[0].get_accuracy(weighted_preds, y_test, dataset_info[args.test_dataset]['mode'])
         else:
             test_acc = stack_clf.fit_regression(X_trainval_feature, y_trainval, X_test_feature, y_test)
@@ -253,12 +277,6 @@ def main_worker(config=None):
         best_score = 0.0
         best_params = {}
         results = {}
-        # mean_y = torch.tensor(y_test).float().mean(0)
-        # mean_y = torch.cat([mean_y for _ in range(y_test.shape[0])]).reshape(y_test.shape[0], -1)
-        # print(mean_y, y_test)
-        # mean_baseline = r2_score(y_test, mean_y)
-        # print("-------------------- MEAN BASELINE ------------------------")
-        # print(mean_baseline)
         results_file = open(os.path.join("results", args.test_dataset + "_randombaseline.json"), 'w')
         for wd in tqdm(wd_range, desc='Selecting best hyperparameters for classifier'):
             clf, C = set_params(clf, wd, dataset_info[args.test_dataset]['mode'])
@@ -286,15 +304,17 @@ def set_params(clf, wd, mode):
     return clf, C
 
 
-def find_lstsq_weights(val_preds, y_val, num_classes, mode):
+def find_lstsq_weights(val_preds, y_val, num_classes, mode, cls = None):
     val_preds = np.array(val_preds).reshape(len(val_preds), -1)
     val_preds = np.transpose(val_preds)
     if mode == 'classification':
-        # y_val_ = np.eye(num_classes)[y_val].reshape(-1)
-        y_val_ = y_val.reshape(-1, num_classes)
+        if cls is None:
+            y_val_ = np.eye(num_classes)[y_val].reshape(-1)
+            print(y_val_.shape, val_preds.shape)
+        else:
+            y_val_ = y_val.reshape(-1)
     else:
         y_val_ = y_val.reshape(-1)
-    print(val_preds.shape, y_val_.shape)
     lstsq_weights = np.linalg.lstsq(val_preds, y_val_)[0]
     # lstsq_weights = nnls(val_preds, y_val_)[0]
     lstsq_weights = np.expand_dims(lstsq_weights, 1)
@@ -311,6 +331,12 @@ def evaluate_temp_scaling(classifier, X_test_feature, y_test, batch_size, metric
 
     return ece, scaled_ece
 
+# correct solution:
+def softmax(x):
+    """Compute softmax values for each sets of scores in x."""
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum(axis=0) # only difference
+
 # Testing classes and functions
 def get_features(train_loader, test_loader, model, device, baseline, num_classes, mode, test=True):
     X_train_feature, y_train = inference(train_loader, model, device, baseline, num_classes, mode, 'train')
@@ -321,7 +347,7 @@ def inference(loader, model, device, baseline, num_classes, mode, split):
     model.eval()
     feature_vector = []
     labels_vector = []
-    
+    iter = 0
     for data in tqdm(loader, desc=f'Computing features for {split} set'):
         batch_x, batch_y = data
         batch_x = batch_x.cuda(device)
@@ -334,6 +360,7 @@ def inference(loader, model, device, baseline, num_classes, mode, split):
 
             features = torch.cat(features).reshape(model.N, -1, 2048)
             feature_vector.append(features)
+        iter += 1
 
     if not baseline:
         feature_vector = torch.cat(feature_vector, dim = 1).cpu().detach().numpy()
@@ -382,31 +409,44 @@ class LogisticRegression(nn.Module):
         
         elif self.metric == 'mAP':
             aps_test = []
+            val_preds = []
             for cls in range(self.num_classes):
                 self.clf.fit(X_train, y_train[:, cls])
+                pred_test_prob = self.clf.predict_log_proba(X_test)
                 pred_test = self.clf.decision_function(X_test)
+                val_preds.append(pred_test_prob)
                 ap_test = voc_eval_cls(y_test[:, cls], pred_test)
                 aps_test.append(ap_test)
 
             mAP_test = 100. * np.mean(aps_test)
-
+            val_preds = np.array(val_preds).T
             return mAP_test
 
-    def get_pred(self, X):
-        return self.clf.predict_log_proba(X)
+    def get_pred(self, X, X_train=None, y_train=None):
+        if self.metric == 'mAP':
+            output = []
+            for cls in range(self.num_classes):
+                self.clf.fit(X_train, y_train[:, cls])
+                pred_test = self.clf.decision_function(X)
+                output.append(pred_test)
+            return np.array(output).T
+        else:
+            return self.clf.predict_log_proba(X)
 
     def get_accuracy(self, y_pred, y_true, mode=None):
         if self.metric == 'accuracy':
             y_pred = y_pred.argmax(1)
             return accuracy_score(y_true, y_pred) * 100.
+
         elif self.metric == 'mean per-class accuracy':
             cm = confusion_matrix(y_true, y_pred.argmax(1))
             cm = cm.diagonal() / cm.sum(axis=1) 
             return 100. * cm.mean()
+
         elif self.metric == 'mAP':
             aps_test = []
             for cls in range(self.num_classes):
-                ap_test = voc_eval_cls(y_true[:, cls], y_pred)
+                ap_test = voc_eval_cls(y_true[:, cls], y_pred[:, cls])
                 aps_test.append(ap_test)
             mAP_test = 100. * np.mean(aps_test)
             return mAP_test
@@ -427,6 +467,7 @@ class LinearRegression(nn.Module):
     def set_params(self, d):
         self.clf.set_params(**d)
 
+    @ignore_warnings(category=ConvergenceWarning)
     def fit_regression(self, X_train, y_train, X_test, y_test):
         if self.metric == 'r2':
             self.clf.fit(X_train, y_train)
@@ -510,8 +551,6 @@ class StackingModel(nn.Module):
         self.final_estimator, _ = set_params(self.final_estimator, torch.tensor(best_params["C"]), self.mode)
         test_score = self.final_estimator.fit_regression(trainval_preds, y_trainval, test_preds, y_test)
         print("TEST", test_score)
-
-
 
 if __name__ == '__main__':
     main()

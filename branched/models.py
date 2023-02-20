@@ -60,7 +60,7 @@ class BranchedResNet(nn.Module):
 
 
 # # Checks
-# model = DiverseResNet(N = 5, arch ='resnet50', num_classes = 100)
+# model = BranchedResNet(N = 5, arch ='resnet50', num_classes = 1000)
 # print(model)
 
 # x = torch.randn((16, 3, 224, 224))

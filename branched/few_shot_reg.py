@@ -160,6 +160,7 @@ def main(args):
                     best_score = val_acc
                     best_params["C"] = C
 
+            print("Bestest score", best_score, best_params)
             if best_score < 0:
                 best_score = 0.0
                 best_params["C"] = 0.0

@@ -21,7 +21,9 @@ from sklearn.preprocessing import minmax_scale
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore", message=r"Passing", category=FutureWarning)
-
+from datasets import tta_augmentations
+import os
+from torchvision import transforms
 
 dataset_info = {
     'fc100': {
@@ -141,6 +143,11 @@ def main(args):
     backbone = load_backbone(args)
     backbone.eval()
 
+    tensor_to_pil = transforms.ToPILImage()
+    inv_normalize = transforms.Normalize(
+        mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255],
+        std=[1/0.229, 1/0.224, 1/0.255]
+    )
     all_accuracies = []
     if args.baseline:
         results_file = open(os.path.join("results", "few_shot", args.test_dataset + "_" + str(args.K) + "_baseline.txt"), 'w')
@@ -161,7 +168,21 @@ def main(args):
                 X_train = backbone(train_batch)
                 Y_train = train_labels
 
-                X_test = backbone(test_batch)
+                if not args.tta:
+                    X_test = backbone(test_batch)
+                elif args.tta:
+                    X_test=[]
+                    for bs in range(0, test_batch.shape[0]):
+                        tta_test_batch = []
+                        pil_im = tensor_to_pil(inv_normalize(test_batch[bs]))
+                        for aug in tta_augmentations:
+                            aug = transforms.Compose(aug)
+                            aug_im = aug(pil_im)
+                            tta_test_batch.append(aug_im)
+                        tta_test_batch = torch.stack(tta_test_batch).to(device)
+                        X_test.append(backbone(tta_test_batch).mean(0))
+                    X_test = torch.stack(X_test).to(device)
+
                 Y_test = test_labels
             else:
                 _, X_train = backbone(train_batch, reshape = False)
@@ -228,6 +249,7 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
     parser.add_argument('--baseline', action='store_true', help="Use resnet or hyper-resnet")
+    parser.add_argument('--tta', action='store_true', help="Use resnet or hyper-resnet")
     parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +

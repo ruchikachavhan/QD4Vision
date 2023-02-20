@@ -54,7 +54,6 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
         acc1, acc5 = accuracy(output, labels, topk=(1, 5))
         acc1_avg += acc1.item()
         acc1_avg += acc5.item()
-        wandb.log({"acc": acc1, "ce loss": loss})
         ce_losses.update(loss.item(), images.size(0))
         top1.update(acc1, images.size(0))
         top5.update(acc5, images.size(0))
@@ -64,12 +63,13 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
         # torch.cuda.empty_cache()
         if iter % args.print_freq == 0:
             progress.display(iter)
+            wandb.log({"acc": top1.avg, "ce loss": ce_losses.avg})
 
     acc1_avg /= (iter+1)
     acc5_avg /= (iter+1)
     torch.cuda.empty_cache()
    
-    return acc1_avg, acc5_avg, ce_losses.avg
+    return top1.avg, top5.avg, ce_losses.avg
 
 
 def evaluate(train_loader, model, criterion, epoch, args):
@@ -98,6 +98,8 @@ def evaluate(train_loader, model, criterion, epoch, args):
         adapter_configuration = np.array([sample_adapter_configuration(args.num_adapters) for _ in range(num_tsa_layers)])
         eval_adapter_configurations.append(adapter_configuration)
 
+    diff = 0.0
+
     for iter, data in enumerate(train_loader):
         acc1_list = np.zeros(args.n_eval_adapters)
         images, labels = data[0], data[1]
@@ -110,7 +112,6 @@ def evaluate(train_loader, model, criterion, epoch, args):
         images = get_aug_wise_images(images, args)
     
         loss = 0.0 # Mean loss of adapter configuration
-        diff = 0.0
         features = []
 
         for k in range(args.n_eval_adapters):
@@ -126,18 +127,15 @@ def evaluate(train_loader, model, criterion, epoch, args):
         similarity_matrix += get_similarity_vector(features, args)
         diff += get_pairwise_rowdiff(similarity_matrix)
         
-
-        wandb.log({"val acc": np.mean(acc1_list), "val loss": loss})
         ce_losses.update(loss.item()/(k+1), images.size(0))
         top1.update(np.mean(acc1_list), images.size(0))
-
         all_accuracies += acc1_list
         batch_time.update(time.time() - end)
         end = time.time()
         # torch.cuda.empty_cache()
         if iter % args.print_freq == 0:
             progress.display(iter)
-
+            wandb.log({"val acc": top1.avg, "val loss": ce_losses.avg})
 
     all_accuracies /= (iter+1)
     similarity_matrix /= (iter+1)

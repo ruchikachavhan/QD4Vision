@@ -78,6 +78,24 @@ dorsal_augmentations = [
     transforms.ToTensor(),
     normalize
 ]
+tta_augmentations = [
+    transforms.RandomResizedCrop((img_size, img_size)),
+    transforms.RandomHorizontalFlip(p=1.0),
+    transforms.RandomVerticalFlip(p=1.0),
+    transforms.RandomAffine(degrees=90, translate=(0.1, 0.1)),
+    transforms.RandomRotation(270),
+    transforms.RandomApply([
+        transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+    ], p=1.0),
+    transforms.RandomGrayscale(p=1.0),
+    transforms.RandomApply([GaussianBlur([.1, 2.])], p=1.0),
+    transforms.ToTensor(),
+    normalize
+]
+
+# tta augmentations
+tta_augmentations = list(itertools.combinations(tta_augmentations[:-2], 1))
+tta_augmentations = [(transforms.Resize((img_size, img_size)), ) + tta_augmentations[i]+ (transforms.ToTensor(), normalize) for i in range (len(tta_augmentations))]
 
 combinations_default = list(itertools.combinations(default_augmentations[:-2], 1))
 combinations_default = [(transforms.Resize((img_size, img_size)), ) + combinations_default[i]+ (transforms.ToTensor(), normalize) for i in range (len(combinations_default))]
@@ -102,9 +120,8 @@ base_augs = [
 class CropsTransform:
     """Returns two random crops of one image for each type of augmentation"""
 
-    def __init__(self, augs_list, k):
+    def __init__(self, augs_list):
         self.augs_list = augs_list
-        self.k = k
 
     def __call__(self, x):
         outputs = []

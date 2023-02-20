@@ -26,3 +26,9 @@ __pycache__
 wandb/
 .ipynb_checkpoints/
 adapters/train_results/
+detectron2/
+ensembleObjectDetection/
+models_pytorch/
+ood_testing/
+TestDatasets/
+saved/

@@ -224,7 +224,10 @@ class FacesInTheWild300W(Dataset):
 
         if self.transform is not None:
             image = self.transform(image)
-        new_h, new_w = image.shape[1:]
+        try:
+            new_h, new_w = image.shape[1:]
+        except:
+            new_h, new_w = image.shape[2:]
 
         keypoint = torch.tensor([[
             ((x - ((w - min_side) / 2)) / min_side) * new_w,
@@ -583,7 +586,10 @@ class LeedsSportsPose(Dataset):
 
         if self.transform is not None:
             image = self.transform(image)
-        new_h, new_w = image.shape[1:]
+        try:
+            new_h, new_w = image.shape[1:]
+        except:
+            new_h, new_w = image.shape[2:]
 
         joints = torch.tensor([[
             ((x - ((w - min_side) / 2)) / min_side) * new_w,

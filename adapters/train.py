@@ -153,7 +153,8 @@ def main():
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node = torch.cuda.device_count()
+    ngpus_per_node =6
+    # torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -209,8 +210,8 @@ def main_worker(gpu, ngpus_per_node, args):
         optimizer = torch.optim.RMSprop(
             model_adapters.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, eps=0.0316, alpha=0.9
         )
-    elif args.opt == "adamw":
-        optimizer = torch.optim.AdamW(model_adapters.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    elif args.opt == "adadelta":
+        optimizer = torch.optim.Adadelta(model_adapters.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:
         raise RuntimeError(f"Invalid optimizer {args.opt}. Only SGD, RMSprop and AdamW are supported.")
 
@@ -263,7 +264,7 @@ def main_worker(gpu, ngpus_per_node, args):
         # local_rank = int(os.environ['LOCAL_RANK'])
         model_adapters = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model_adapters)
         # For multiprocessing distributed, DistributedDataParallel constructor
-        # should always set the single device scope, otherwise,
+        # should always set the single device scope, otherwise, 
         # DistributedDataParallel will use all available devices.
         if args.gpu is not None:
             torch.cuda.set_device(args.gpu)
@@ -367,7 +368,7 @@ def main_worker(gpu, ngpus_per_node, args):
     print("Training and validation data path", traindir, valdir)
     print('Training and validation data size:', len(train_dataset), len(val_dataset))
 
-    fname = 'adapers_%s_%s_%s_%s-supervised%d_checkpoint_%04d.pth.tar'%(args.arch, args.ad_type, args.ad_form, args.train_data, args.num_augs, args.start_epoch)
+    fname = 'adapers_%s_%s_%s_%s-supervised%d_checkpoint_%04d.pth.tar'%(args.arch, args.ad_type, args.ad_form, args.train_data, args.num_augs, args.epochs)
     quality = []
     diversity = []
     best_loss = 0.0
@@ -386,9 +387,9 @@ def main_worker(gpu, ngpus_per_node, args):
 
             train_acc1, train_acc5, train_loss = train(train_loader, model_adapters, criterion, 
                                     optimizer, scaler, epoch, args)
-            lr_scheduler.step()
+            # lr_scheduler.step()
             print("Training Accuracy", train_acc1, "Training Loss", train_loss)
-            result_file_name = os.path.join("adapters/train_results", "Epoch_" + str(epoch) + ".json")
+            result_file_name = os.path.join("adapters/train_results", "Epoch_" + "_" + args.ad_type+ "_"+ str(epoch) + ".json")
             test_acc, similarity_matrix, diff, adapter_configurations = evaluate(val_loader, model_adapters, criterion, epoch, args)
             results_dict['test acc'] = test_acc.tolist()
             results_dict["similarity_matrix"] = similarity_matrix.tolist()
@@ -406,7 +407,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 
                 if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                     and args.rank == 0): # only the first GPU saves checkpoint
-                    print("Saving checkpoint in", os.path.join(args.output_dir, fname % args.epochs))
+                    print("Saving checkpoint in", os.path.join(args.output_dir, fname))
                     save_checkpoint({
                         'epoch': epoch + 1,
                         'arch': args.arch,
@@ -415,7 +416,7 @@ def main_worker(gpu, ngpus_per_node, args):
                         "lr_scheduler": lr_scheduler.state_dict(),
                         'scaler': scaler.state_dict(),
                         # 'model_ema': model_ema.state_dict(),
-                    }, is_best=False, filename=os.path.join(args.output_dir, fname % args.epochs))
+                    }, is_best=False, filename=os.path.join(args.output_dir, fname))
 
 
 if __name__ == '__main__':

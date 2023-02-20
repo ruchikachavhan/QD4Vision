@@ -2,6 +2,9 @@ import copy
 import torch.nn as nn
 import torch
 import numpy as np
+from torchvision.models import resnet50, ResNet50_Weights
+from torchvision.models.resnet import Bottleneck
+import random
 
 def enable_grad(module, keep_grad):
     for p in module.parameters():
@@ -28,7 +31,7 @@ def conv1x1(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
-class Bottleneck(nn.Module):
+class TSABottleneck(nn.Module):
     # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
     # while original implementation places the stride at the first 1x1 convolution(self.conv1)
     # according to "Deep residual learning for image recognition"https://arxiv.org/abs/1512.03385.
@@ -39,7 +42,7 @@ class Bottleneck(nn.Module):
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
                  base_width=64, dilation=1, norm_layer=None):
-        super(Bottleneck, self).__init__()
+        super(TSABottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 64.)) * groups
@@ -54,14 +57,17 @@ class Bottleneck(nn.Module):
         self.downsample = downsample
         self.stride = stride
 
-    def forward(self, x):
+    def forward(self, inputs):
+        x = inputs[0]
+        adapt_idx = inputs[1]
         identity = x
 
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
 
-        out = self.conv2(out)
+        # assert isinstance(self.conv2, TSA_Conv2d) == True
+        out = self.conv2(out, adapt_idx)
         out = self.bn2(out)
         out = self.relu(out)
 
@@ -74,7 +80,7 @@ class Bottleneck(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out
+        return [out, adapt_idx]
 
 class ResNet(nn.Module):
     def __init__(
@@ -109,8 +115,8 @@ class ResNet(nn.Module):
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
+        self.layer1 = self._make_layer(Bottleneck, 64, layers[0])
+        self.layer2 = self._make_layer(Bottleneck, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -198,7 +204,7 @@ class TSA_Conv2d(nn.Module):
         if self.ad_type == 'residual':
             if self.ad_form == 'matrix':
                 if op.stride[0] == 2:
-                    self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=3, stride= (2, 2), bias=True) for _ in range(num_adapters)])
+                    self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=3, stride= (2, 2), padding = (1,1), bias=True) for _ in range(num_adapters)])
                 else:
                     self.alpha = nn.ModuleList([nn.Conv2d(self.op.out_channels, self.op.out_channels, kernel_size=1, bias=True) for _ in range(num_adapters)])
             else:
@@ -219,27 +225,24 @@ class TSA_Conv2d(nn.Module):
                 nn.init.dirac_(self.alpha[i].weight)
         self.adapt = None
 
-    def forward(self, x):
-        assert self.adapt is not None  # if it is still None, we forgot to set it
+    def forward(self, x, adapt_idx=None):
         op_x = self.op(x)
         output = 0.0
 
-        for k in range(len(self.alpha)):
-            if self.adapt[k]:
-                if self.ad_type == 'residual':
-                    if self.ad_form == 'matrix':
-                        output += self.alpha[k](x)
-                    else:
-                        output += x * self.alpha[k] + self.alpha_bias[k]
-                elif self.ad_type == 'series':
-                    if self.ad_form == 'matrix':
-                        output += self.alpha[k](op_x)
-                    else:
-                        output += op_x * self.alpha[k] + self.alpha_bias[k]
-
-        if np.all(self.adapt == 0):
+        if adapt_idx is None:
             return op_x
         else:
+            if self.ad_type == 'residual':
+                if self.ad_form == 'matrix':
+                    output += self.alpha[adapt_idx](x)
+                else:
+                    output += x * self.alpha[adapt_idx] + self.alpha_bias[adapt_idx]
+            elif self.ad_type == 'series':
+                if self.ad_form == 'matrix':
+                    output += self.alpha[adapt_idx](op_x)
+                else:
+                    output += op_x * self.alpha[adapt_idx] + self.alpha_bias[adapt_idx]
+
             if self.ad_type == 'residual':
                 return op_x + output
             elif self.ad_type == 'series':
@@ -252,7 +255,8 @@ class TSA_ResNet(ResNet):
         layers,
         ad_type,
         ad_form,
-        num_adapters=5,
+        num_adapters,
+        sampled_adapters,
         num_classes=1000,
         zero_init_residual=False,
         groups=1,
@@ -272,17 +276,86 @@ class TSA_ResNet(ResNet):
             norm_layer=norm_layer,
             state_dict=state_dict,
         )
-        for layer in [self.layer1, self.layer2, self.layer3, self.layer4]:
+        pretrained_model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        self.load_state_dict(pretrained_model.state_dict())
+        # for layer in [self.layer1, self.layer2, self.layer3, self.layer4]:
+        for layer in [self.layer3, self.layer4]:
             for block in layer:
                 for name, m in block.named_children():
                     if isinstance(m, nn.Conv2d) and m.kernel_size[0] == 3:
                         setattr(block, name, TSA_Conv2d(m, num_adapters, ad_type, ad_form))
         self.tsa_init = 'eye'
         self.ad_type = ad_type
+        self.num_adapters = num_adapters
+        self.sampled_adapters = sampled_adapters
+        self.branches_fc = nn.ModuleList()
+        for k in range(self.num_adapters):
+            if k != self.num_adapters -1:
+                self.branches_fc.append(nn.Linear(2048, 1000))
+            else:
+                self.branches_fc.append(pretrained_model.fc)
 
-    def forward(self, x):
-        return super().forward(x)
+        del pretrained_model, self.fc
+
+        self.reset()
+
+    def forward(self, input, select = True):
+        # For every forward pass, we select which adapters to use
+        outputs = []
+        features = []
+        self.adaper_idxs = [k for k in range(self.num_adapters)] 
+        if select:
+            # Randomly select two adapters to use
+            self.select_adapter_idx = random.sample(self.adaper_idxs, self.sampled_adapters)
+            self.select_adapter_idx.append(None)
+        else:
+            self.select_adapter_idx = self.adaper_idxs
+        # disable_grad of all other adapters and backbone
+        self.enable_adapter_grads()
+        # Add None for baseline, id adapter ids are Nonce, then we use baseline
+        
+        for k in self.select_adapter_idx:
+            x = self.conv1(input)
+            x = self.bn1(x)
+            x = self.relu(x)
+            x = self.maxpool(x)
+            # send only one input as a list to each layer because nn.Sequential does not support multiple inputs
+            x1= self.layer1(x)
+            x2 = self.layer2(x1)
+            x3, _ = self.layer3([x2, k])
+            x4, _ = self.layer4([x3, k])
+            feats = self.avgpool(x4)
+            feats = torch.flatten(feats, 1)
+            features.append(feats)
+            if k is not None:
+                out = self.branches_fc[k](feats)
+            else:
+                out = self.branches_fc[-1](feats)
+            outputs.append(out)
+        
+        outputs = torch.stack(outputs, dim=0) #(num_adapters, bs, num_classes)
+        features = torch.stack(features, dim=0) #(num_adapters, bs, 2048)
+        return outputs, features
     
+    def disable_all_grads(self):
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def enable_adapter_grads(self):
+        for k in self.adaper_idxs:
+            if k in self.select_adapter_idx:
+                for name, param in self.named_parameters():
+                    if 'alpha.{}.'.format(str(k)) in name:
+                        param.requires_grad = True
+                    if 'fc.{}.'.format(str(k)) in name:
+                        param.requires_grad = True
+            else:
+                for name, param in self.named_parameters():
+                    if 'alpha.{}.'.format(str(k)) in name:
+                        param.requires_grad = False
+                    if 'fc.{}.'.format(str(k)) in name:
+                        param.requires_grad = False
+
     def reset(self):
         # initialize task-specific adapters (alpha)
         for k, v in self.named_parameters():
@@ -290,7 +363,8 @@ class TSA_ResNet(ResNet):
                 # initialize each adapter as an identity matrix
                 if self.tsa_init == 'eye':
                     if v.dim() == 4:
-                        v.data = torch.eye(v.size(0), v.size(1)).unsqueeze(-1).unsqueeze(-1).to(v.device)
+                        nn.init.dirac_(v)
+                        # v.data = torch.eye(v.size(0), v.size(1)).unsqueeze(-1).unsqueeze(-1).to(v.device)
                     else:
                         v.data = torch.ones(v.size()).to(v.device)
                     # for residual adapter, each adapter is initialized as identity matrix scaled by 0.0001
@@ -302,59 +376,12 @@ class TSA_ResNet(ResNet):
                     # randomly initialization
                     v.data = torch.rand(v.data.size()).data.normal_(0, 0.001).to(v.device)
 
-
-def sample_adapter_configuration(num_adapters):
-    # Sample one hot vector of length num_adapters
-    target = np.random.randint(num_adapters)
-    adapter_configuration = np.zeros(num_adapters)
-    adapter_configuration[target] = 1
-    return adapter_configuration
-    # return np.random.rand(num_adapters).round().astype(np.uint8)
-
 def num_parameters(model):
     return sum(p.numel() for p in model.parameters())
      
-
-class SuperNetSampler(nn.Module):
-    def __init__(self, model, num_adapters, num_adapters_per_conv):
-        super().__init__()
-        self.model = model
-        self.num_adapters = num_adapters
-        self.num_adapters_per_conv = num_adapters_per_conv
-
-    def sample_subnet(self, adapter_configuration=None):
-        # optionally you can pass your own adapter configuration, instead of randomly sampling it
-        if adapter_configuration is None:
-            adapter_configuration = np.array([sample_adapter_configuration(self.num_adapters_per_conv) for _ in range(self.num_adapters)])
-        disable_grad(self.model)
-        i_conf = 0
-        for _, m in self.model.named_modules():
-            if isinstance(m, TSA_Conv2d):
-                m.adapt = (adapter_configuration[i_conf, :] == 1)
-                if m.ad_form == 'matrix':
-                    for i in range(0, len(m.adapt)):
-                        enable_grad(m.alpha[i], m.adapt[i])
-                else:
-                    for i in range(0, len(m.adapt)):
-                        m.alpha[i].requires_grad = bool(m.adapt[i])
-                        m.alpha_bias[i].requires_grad = bool(m.adapt[i])
-                i_conf += 1
-
-    def forward(self, x):
-        return self.model(x)
-
-
-def create_tsa_resnet(state_dict, block, layers, ad_type, ad_form, supernet=True, **kwargs):
-    # can optionally pass a state_dict, if ResNet backbone is pre-trained
-    model = TSA_ResNet(block, layers, ad_type = ad_type, ad_form = ad_form, state_dict=state_dict, **kwargs)
-    model.reset()
-    if supernet:
-        num_adapters = len([n for n, m in model.named_modules() if isinstance(m, TSA_Conv2d)])
-        model = SuperNetSampler(model, num_adapters, num_adapters_per_conv=5)
-    return model
-
-# model = create_tsa_resnet(None, Bottleneck, [3, 4, 6, 3], True)
-# model.sample_subnet()
+    
+# model = TSA_ResNet(TSABottleneck, [3, 4, 6, 3], 'residual', 'matrix', 16)
+# print(model)
 # x = torch.randn(64, 3, 224, 224)
-# output = model(x)
-# print(output.shape)
+# output, feats = model(x)
+# print(output.shape, feats.shape)
