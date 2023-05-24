@@ -97,26 +97,26 @@ def domain_net_datasets(image_root, path = 'DomainNet'):
     dataset = {}
     dataset_info = {'clipart': 0, 'painting': 1, 'real': 2, 'sketch': 3}
     image_root = os.path.join(image_root, path)
-    source_train = ImageList(image_root, image_root, 'sketch', dataset_info['sketch'], 'domainnet', split='train', transform=get_train_transform())
+    source_train = ImageList(image_root, image_root, 'sketch', dataset_info['sketch'], 'domainnet', split='train', transform=get_val_transform())
     source_test = ImageList(image_root, image_root, 'sketch', dataset_info['sketch'], 'domainnet', split='test', transform=get_val_transform())
     target_train = []
     target_test = []
     num_classes = 40
     for domain in dataset_info.keys():
         if domain != 'sketch':
-            target_train.append(ImageList(image_root, image_root, domain, dataset_info[domain], 'domainnet', split='train', transform=get_train_transform()))
+            target_train.append(ImageList(image_root, image_root, domain, dataset_info[domain], 'domainnet', split='train', transform=get_val_transform()))
             target_test.append(ImageList(image_root, image_root, domain, dataset_info[domain], 'domainnet', split='test', transform=get_val_transform()))
     target = torch.utils.data.ConcatDataset(target_train + target_test)
-    return source_train, source_test, target, num_classes
+    return source_train, source_test, target_test, num_classes
 
 def CIFAR_STL_dataset(image_root):
-    source_train = CIFAR10(image_root, train=True, transform=get_train_transform(), download=True)
+    source_train = CIFAR10(image_root, train=True, transform=get_val_transform(), download=True)
     source_test = CIFAR10(image_root, train=False, transform=get_val_transform(), download=True)
-    target_train = STL10(image_root, split='train', transform=get_train_transform(), download=True)
+    target_train = STL10(image_root, split='train', transform=get_val_transform(), download=True)
     target_test = STL10(image_root, split='test', transform=get_val_transform(), download=True)
-    target = torch.utils.data.ConcatDataset([target_train, target_test])
+    # target = torch.utils.data.ConcatDataset([target_train, target_test])
     num_classes = 10
-    return source_train, source_test, target, num_classes
+    return source_train, source_test, target_test, num_classes
 
 # Test the domain net dataset
 # domainnet_info = {'clipart': 0, 'painting': 1, 'real': 2, 'sketch': 3}
@@ -248,9 +248,9 @@ class Breeds(Dataset):
         return len(self._idx_to_class_id)
 
 def breeds_dataset(root, info_dir, dataset_name):
-    source_train = Breeds(root=root, breeds_name=dataset_name, info_dir=info_dir, source=True, target=False, split='train', transform=get_train_transform())
-    source_test = Breeds(root=root, breeds_name=dataset_name, info_dir=info_dir, source=True, target=False, split='val', transform=get_train_transform())
-    target = Breeds(root=root, breeds_name=dataset_name, info_dir=info_dir, source=False, target=True, split='val', transform=get_train_transform())
+    source_train = Breeds(root=root, breeds_name=dataset_name, info_dir=info_dir, source=True, target=False, split='train', transform=get_val_transform())
+    source_test = Breeds(root=root, breeds_name=dataset_name, info_dir=info_dir, source=True, target=False, split='val', transform=get_val_transform())
+    target = Breeds(root=root, breeds_name=dataset_name, info_dir=info_dir, source=False, target=True, split='val', transform=get_val_transform())
     if dataset_name == 'living17':
         num_classes = 17
     elif dataset_name == 'entity30':

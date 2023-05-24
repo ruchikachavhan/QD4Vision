@@ -1,29 +1,27 @@
 import random
+import os
 from argparse import ArgumentParser
 from functools import partial
-from copy import deepcopy
 from collections import defaultdict
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision import transforms as T
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
-from sklearn.linear_model import LogisticRegression
-from downstream_utils import *
 import torchvision
+from sklearn.linear_model import LogisticRegression
+from downstream_utils import load_backbone
 from torchvision.datasets import ImageFolder, Flowers102
 from PIL import Image
 import torchvision.models as torchvision_models
-from main_linear import find_lstsq_weights
-from sklearn.metrics import confusion_matrix, precision_recall_curve, accuracy_score, r2_score
+from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import minmax_scale
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings("ignore", message=r"Passing", category=FutureWarning)
-from datasets import tta_augmentations
-import os
-from torchvision import transforms
+
 
 dataset_info = {
     'fc100': {
@@ -127,13 +125,13 @@ class FewShotBatchSampler(torch.utils.data.Sampler):
 def main(args):
     cudnn.benchmark = True
     device = args.gpu
+    args.model_type = 'branched'
 
     # DATASETS
     datasets = load_fewshot_datasets(dataset=args.test_dataset,
                                      datadir=args.datadir)
-    print(datasets['test'])
-    if not args.baseline:
-        args.Q = 2 * args.Q
+    print("Few shot dataset: ", args.test_dataset)
+    
     build_sampler    = partial(FewShotBatchSampler,
                                N=args.N, K=args.K, Q=args.Q, num_iterations=args.num_tasks, name = args.test_dataset)
     build_dataloader = partial(torch.utils.data.DataLoader,
@@ -143,16 +141,16 @@ def main(args):
     backbone = load_backbone(args)
     backbone.eval()
 
-    tensor_to_pil = transforms.ToPILImage()
-    inv_normalize = transforms.Normalize(
+    tensor_to_pil = T.ToPILImage()
+    inv_normalize = T.Normalize(
         mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255],
         std=[1/0.229, 1/0.224, 1/0.255]
     )
     all_accuracies = []
-    if args.baseline:
-        results_file = open(os.path.join("results", "few_shot", args.test_dataset + "_" + str(args.K) + "_baseline.txt"), 'w')
-    else:
-        results_file = open(os.path.join("results", "few_shot", args.test_dataset + "_" + str(args.K) + ".txt"), 'w')
+    # if args.baseline:
+    #     results_file = open(os.path.join("results", "{}-moco".format(args.moco) if args.moco is not None else "supervised", "few_shot", args.test_dataset + "_" + str(args.K) + "_baseline.txt"), 'w')
+    # else:
+    #     results_file = open(os.path.join("results", "{}-moco".format(args.moco) if args.moco is not None else "supervised", "few_shot", args.test_dataset + "_" + str(args.K) + ".txt"), 'w')
     for i, (batch, _) in tqdm(enumerate(testloader)):
         with torch.no_grad():
             batch = batch.to(device)
@@ -167,32 +165,16 @@ def main(args):
             if args.baseline:
                 X_train = backbone(train_batch)
                 Y_train = train_labels
-
-                if not args.tta:
-                    X_test = backbone(test_batch)
-                elif args.tta:
-                    X_test=[]
-                    for bs in range(0, test_batch.shape[0]):
-                        tta_test_batch = []
-                        pil_im = tensor_to_pil(inv_normalize(test_batch[bs]))
-                        for aug in tta_augmentations:
-                            aug = transforms.Compose(aug)
-                            aug_im = aug(pil_im)
-                            tta_test_batch.append(aug_im)
-                        tta_test_batch = torch.stack(tta_test_batch).to(device)
-                        X_test.append(backbone(tta_test_batch).mean(0))
-                    X_test = torch.stack(X_test).to(device)
-
+                X_test = backbone(test_batch)
                 Y_test = test_labels
             else:
                 _, X_train = backbone(train_batch, reshape = False)
                 Y_train = train_labels
-
                 _, X_test = backbone(test_batch, reshape = False)
                 Y_test = test_labels
 
         if args.baseline:
-            classifier = LogisticRegression(solver='liblinear').fit(X_train.cpu().numpy(),
+            classifier = LogisticRegression(solver='liblinear', C = 10.0).fit(X_train.cpu().numpy(),
                                                                         Y_train.cpu().numpy())
             preds = classifier.predict(X_test.cpu().numpy())
             acc = np.mean((Y_test.cpu().numpy() == preds).astype(float))
@@ -200,8 +182,8 @@ def main(args):
         else:
             spt_preds = []
             qry_preds= []
-            for k in range(0, args.num_encoders + 1):
-                classifier = LogisticRegression(solver='liblinear').fit(X_train[k].cpu().numpy(),
+            for k in range(0, args.ensemble_size + 1):
+                classifier = LogisticRegression(solver='liblinear', C= 10.0).fit(X_train[k].cpu().numpy(),
                                                                         Y_train.cpu().numpy())
                 spt_pred = classifier.predict_log_proba(X_train[k].cpu().numpy())
                 qry_pred = classifier.predict_log_proba(X_test[k].cpu().numpy())
@@ -224,10 +206,10 @@ def main(args):
 
     avg = np.mean(all_accuracies)
     std = np.std(all_accuracies) * 1.96 / np.sqrt(len(all_accuracies))
-    results_file.write("Accuracy, " + str(avg))
-    results_file.write("\n")
-    results_file.write("Std, " + str(std))
-    print("ACCURACY", avg, std)
+    # results_file.write("Accuracy, " + str(avg))
+    # results_file.write("\n")
+    # results_file.write("Std, " + str(std))
+    print("Accuracy", avg, std)
 
 
 if __name__ == '__main__':
@@ -249,14 +231,14 @@ if __name__ == '__main__':
     parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
     parser.add_argument('--baseline', action='store_true', help="Use resnet or hyper-resnet")
-    parser.add_argument('--tta', action='store_true', help="Use resnet or hyper-resnet")
     parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet50)')
-    parser.add_argument('--num_encoders', default=5, type=int, help='Number of encoders')
+    parser.add_argument('--ensemble_size', default=5, type=int, help='Number of members in the ensemble')
+    parser.add_argument('--moco',  default=None, type=str, help="Use MOCO pretrained model")
+
 
     args = parser.parse_args()
-    # args.num_backbone_features = 512 if args.model.endswith('resnet18') else 2048
     main(args)

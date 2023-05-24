@@ -7,6 +7,7 @@ import shutil
 import warnings
 import random
 import copy
+import builtins
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,22 +18,15 @@ import torch.optim
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.transforms as transforms
 import torchvision.models as torchvision_models
-import itertools
-from torch.utils.data.dataloader import default_collate
-from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import torchvision
 import models
 import datasets
-from pretrain_utils import train, evaluate, save_checkpoint, adjust_coeff, adjust_learning_rate, get_pairwise_rowdiff, EarlyStopping, ExponentialMovingAverage, RandomCutmix, RandomMixup
+from pretrain_utils import train, evaluate, save_checkpoint, adjust_coeff, adjust_learning_rate, get_pairwise_rowdiff, EarlyStopping, ExponentialMovingAverage
 import json
 import wandb
-from sampler import RASampler
-import presets
-from torchvision.transforms.functional import InterpolationMode
-from adapter_resnet import TSA_ResNet, TSABottleneck
+
 # python train.py --multiprocessing-distributed --rank 0 --world-size 1 --dist-url "tcp://localhost:10001" --train_data imagenet1k --data /raid/imagenet1k/ --num_augs 6 --batch-size 1024 
 # --lr 0.5 --lr-scheduler cosineannealinglr --lr-warmup-epochs 5 --lr-warmup-method linear --lr-warmup-decay 0.01 --wd 2e-5 --mixup --cutmix --model-ema
 # Models and arguments
@@ -41,7 +35,7 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
 
-model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base', 'convnext'] + torchvision_model_names
+model_names = ['convnext'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='Quality Diversity for Vision: Pretraining')
 
@@ -62,7 +56,7 @@ parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
 parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
                     help='url used to set up distributed training')
-parser.add_argument('--dist-backend', default='gloo', type=str,
+parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
@@ -81,20 +75,14 @@ parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
-parser.add_argument('--model-type', default='branch', type=str, 
+parser.add_argument('--model-type', default='branched', type=str, 
                     help='which model type to use')
-parser.add_argument('--num_encoders', default=5, type=int, help='Number of encoders')
-parser.add_argument('--num_adapters', default=8, type=int, help='Number of adapters')
-parser.add_argument('--sampled_adapters', default=2, type=int, help='Number of adapters')
+parser.add_argument('--ensemble_size', default=5, type=int, help='Number of members in the ensemble')
 parser.add_argument('--num_augs', default=6, type=int, help='Number of encoders')
 parser.add_argument('--coeff', default=0.2, type=float, help='')
 parser.add_argument('--kl_coeff', default=0.1, type=float, help='')
 parser.add_argument('--baseline', action='store_true',
                     help='Use baseline (one backbone) models if true')
-parser.add_argument('--mixup', action='store_true',
-                    help='Use mixup')
-parser.add_argument('--cutmix', action='store_true',
-                    help='Use cutmix')
 parser.add_argument('--epochs', default=20, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
@@ -106,13 +94,6 @@ parser.add_argument('-b', '--batch-size', default=512, type=int,
                          'using Data Parallel or Distributed Data Parallel')
 parser.add_argument("--quality-warmup", type=int, default=20, 
                 help="the number of iterations for which only supervised training will be done",)
-parser.add_argument("--auto-augment", default=None, type=str, help="auto augment policy (default: None)")
-parser.add_argument("--ra-magnitude", default=9, type=int, help="magnitude of auto augment policy")
-parser.add_argument("--augmix-severity", default=3, type=int, help="severity of augmix policy")
-parser.add_argument("--random-erase", default=0.0, type=float, help="random erasing probability (default: 0.0)")
-parser.add_argument("--interpolation", default="bilinear", type=str, help="the interpolation method (default: bilinear)")
-parser.add_argument("--ra-reps", default=3, type=int, help="number of repetitions for Repeated Augmentation (default: 3)")
-parser.add_argument("--ra-sampler", action="store_true", help="whether to use Repeated Augmentation in training")
 
 # Learning rates, scheduler, and EMA
 parser.add_argument('--lr', '--learning-rate', default=1.0, type=float,
@@ -122,10 +103,8 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
 parser.add_argument('--wd', '--weight-decay', default=8e-5, type=float,
                     metavar='W', help='weight decay (default: 1e-6)',
                     dest='weight_decay')
-
 parser.add_argument('--lr-warmup-epochs', default=10, type=int, metavar='N',
                     help='number of warmup epochs')
-
 parser.add_argument("--lr-min", default=0.0, type=float, help="minimum lr of lr schedule (default: 0.0)")
 parser.add_argument("--lr-warmup-decay", default=0.01, type=float, help="the decay for lr")
 parser.add_argument('--train_data', default='imagenet',
@@ -158,11 +137,10 @@ def main():
 
     if args.dist_url == "env://" and args.world_size == -1:
         args.world_size = int(os.environ["WORLD_SIZE"])
-        print("WORLD SIZE", args.world_size)
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node = 6
+    ngpus_per_node = 4
     # torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
@@ -183,7 +161,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
         def print_pass(*args):
             pass
-            # builtins.print = print_pass
+            builtins.print = print_pass
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
@@ -201,29 +179,18 @@ def main_worker(gpu, ngpus_per_node, args):
 
     ############################### Model Instantiation #########################
     # Number of classes according to dataset
-    if args.train_data == 'imagenet':
+    if args.train_data == 'imagenet100':
         args.num_classes = 100
-    elif "office31" in args.train_data:
-        args.num_classes = 31
-    elif "pacs" in args.train_data:
-        args.num_classes = 7
     elif args.train_data == 'imagenet1k':
         args.num_classes = 1000
 
     if args.model_type == 'branched':
         if args.arch == 'resnet50':
-            models_ensemble = models.BranchedResNet(N = args.num_encoders, num_classes = args.num_classes, arch = args.arch)
+            models_ensemble = models.BranchedResNet(N = args.ensemble_size, num_classes = args.num_classes, arch = args.arch)
         elif args.arch == 'convnext':
-            models_ensemble = models.DiverseConvNext(N = args.num_encoders, num_classes = args.num_classes)
-    elif args.model_type == 'adapters':
-        print('series')
-        # model along with fc layers is initialised with imagenet_v2 weights
-        models_ensemble = TSA_ResNet(TSABottleneck, [3, 4, 6, 3], 'series', 'matrix', args.num_adapters,  args.sampled_adapters)
-        # We need to change number of encoders to number of sampled adapters, this is to support train function in pretrain_utils
-        args.num_encoders = args.sampled_adapters
-        for name, param in models_ensemble.named_parameters():
-            if 'alpha' not in name and 'fc' not in name:
-                param.requires_grad = False 
+            models_ensemble = models.DiverseConvNext(N = args.ensemble_size, num_classes = args.num_classes)
+    else:
+        raise NotImplementedError("Only branched models are supported.")
 
     ############################### Optimizers and schedulers ###########################
     if args.opt.startswith("sgd"):
@@ -239,7 +206,7 @@ def main_worker(gpu, ngpus_per_node, args):
             models_ensemble.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, eps=0.0316, alpha=0.9
         )
     elif args.opt == "adamw":
-        optimizer = torch.optim.Adadelta(models_ensemble.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(models_ensemble.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:
         raise RuntimeError(f"Invalid optimizer {args.opt}. Only SGD, RMSprop and AdamW are supported.")
 
@@ -308,7 +275,7 @@ def main_worker(gpu, ngpus_per_node, args):
             models_ensemble.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
-            models_ensemble = torch.nn.parallel.DistributedDataParallel(models_ensemble, find_unused_parameters=True)
+            models_ensemble = torch.nn.parallel.DistributedDataParallel(models_ensemble, find_unused_parameters=False)
     elif args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         models_ensemble = models_ensemble.cuda(args.gpu)
@@ -358,7 +325,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 # delete renamed or unused k
                 del state_dict[k]
             
-            model_without_ddp.load_state_dict(state_dict, strict=False)            
+            models_ensemble.load_state_dict(state_dict)            
             optimizer.load_state_dict(checkpoint['optimizer'])
             scaler.load_state_dict(checkpoint['scaler'])
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
@@ -378,58 +345,21 @@ def main_worker(gpu, ngpus_per_node, args):
     ############################# Data Loading code #############################
     if args.num_augs == 2:
         augs_list = [datasets.dorsal_augmentations, datasets.ventral_augmentations, datasets.base_augs]
-    elif args.num_augs in [4, 5]:
-        # TODO: Need to change this to have combinations
+    else:
+        assert args.num_augs == 5
         augs_list = datasets.combinations_default
-        augs_list.append(datasets.base_augs)
-    elif args.num_augs == 6:
-        augs_list = datasets.combinations_default_edges
-        augs_list.append(datasets.base_augs)
+        augs_list.append(datasets.base_augs) #Last transformation corresponds to no augmentation
 
-
-    if args.train_data in ['imagenet', 'imagenet1k']:
+    if args.train_data in ['imagenet100', 'imagenet1k']:
         traindir = os.path.join(args.data, 'train')
         valdir = os.path.join(args.data, 'val')
-    elif 'office31' in args.train_data:
-        source_name = args.train_data.split("-")[-1]
-        traindir = os.path.join(args.data, source_name, "images")
-        valdir = os.path.join(args.data, source_name, "images")
-    elif 'pacs' in args.train_data:
-        sources = ['art_painting', 'cartoon', 'photo']
-        traindir = [os.path.join(args.data, sources[i]) for i in range(len(sources))]
-
-    if args.train_data == 'pacs':
-        # For PACS, we split images from P, A, C into train/val
-        all_train_datasets = [torchvision.datasets.ImageFolder(traindir[i],
-                    datasets.CropsTransform(augs_list, args.num_augs)) for i in range(len(sources))]
-        train_dataset = torch.utils.data.ConcatDataset(all_train_datasets)
-        train_size = int(0.8*len(train_dataset))
-        val_size = len(train_dataset) - train_size
-        train_datatset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
-
-    elif "office31" in args.train_data:
-        # For Office-31, we use source domain images for training
-        train_dataset = torchvision.datasets.ImageFolder(traindir,
-                    datasets.CropsTransform(augs_list, args.num_augs))
-        val_dataset = train_dataset
-        # train_size = int(0.8*len(train_dataset))
-        # val_size = len(train_dataset) - train_size
-        # train_datatset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
     else:
-        train_transform = []
-        if args.mixup:
-            train_transform.append(RandomMixup(args.num_classes, p=1.0, alpha=0.2).cuda(args.gpu))
-        if args.cutmix:
-            train_transform.append(RandomCutmix(args.num_classes, p=1.0, alpha=1.0).cuda(args.gpu))
-        if args.cutmix:
-            mixupcutmix = torchvision.transforms.RandomChoice(train_transform)
-            # def collate_fn(batch):
-            #     return mixupcutmix(*default_collate(batch))
+        raise NotImplementedError("Only imagenet100 and imagenet1k are supported.")
 
-        train_dataset = torchvision.datasets.ImageFolder(traindir,
-                    datasets.CropsTransform(augs_list))
-        val_dataset = torchvision.datasets.ImageFolder(valdir,
-                    datasets.CropsTransform(augs_list))
+    train_dataset = torchvision.datasets.ImageFolder(traindir,
+                datasets.CropsTransform(augs_list))
+    val_dataset = torchvision.datasets.ImageFolder(valdir,
+                datasets.CropsTransform(augs_list))
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -447,55 +377,15 @@ def main_worker(gpu, ngpus_per_node, args):
     print("Training and validation data path", traindir, valdir)
     print('Training and validation data size:', len(train_dataset), len(val_dataset))
 
-
-    # Training data for supervised loss function
-    # This data loader applies, mixup, cutmix, auto_augment, repeated augmentation to images 
-    # interpolation = InterpolationMode(args.interpolation)
-
-    # auto_augment_policy = getattr(args, "auto_augment", None)
-    # random_erase_prob = getattr(args, "random_erase", 0.0)
-    # ra_magnitude = args.ra_magnitude
-    # augmix_severity = args.augmix_severity
-    # supervised_dataset = torchvision.datasets.ImageFolder(
-    #     traindir,
-    #     presets.ClassificationPresetTrain(
-    #         crop_size=224,
-    #         interpolation=interpolation,
-    #         auto_augment_policy=auto_augment_policy,
-    #         random_erase_prob=random_erase_prob,
-    #         ra_magnitude=ra_magnitude,
-    #         augmix_severity=augmix_severity,
-    #     ),
-    # )
-
-    # if args.distributed:
-    #     if hasattr(args, "ra_sampler") and args.ra_sampler:
-    #         sup_train_sampler = RASampler(supervised_dataset, shuffle=True, repetitions=args.ra_reps)
-    #     else:
-    #         sup_train_sampler = torch.utils.data.distributed.DistributedSampler(supervised_dataset)
-    # else:
-    #     sup_train_sampler = torch.utils.data.RandomSampler(supervised_dataset)
-
-    # sup_data_loader = torch.utils.data.DataLoader(
-    #     supervised_dataset,
-    #     batch_size=args.batch_size,
-    #     sampler=sup_train_sampler,
-    #     num_workers=args.workers,
-    #     pin_memory=True,
-    # )
-
-
-    fname = '%s_%s_%s-supervised%d_checkpoint_kl_%04d.pth.tar'%(args.arch, args.train_data, args.model_type, args.num_augs, args.epochs)
+    fname = '%s_%s_%s-supervised%d_checkpoint_%s_%04d.pth.tar'%(args.arch, args.train_data, args.model_type, args.num_augs, args.ensemble_size, args.epochs)
     coeff = args.coeff
 
     quality = []
     diversity = []
-    best_loss = 0.0
-    early_stopping = EarlyStopping(tolerance=5, min_delta=5)
 
     with wandb.init(project="QD ImageNet pretraining", name=f"experiment_{'QD4v'}",  config={
         "learning_rate": args.lr,
-        "architecture": "R50",
+        "architecture": args.arch,
         "dataset": "ImageNet",
         "epochs": args.epochs,
       }):
@@ -505,18 +395,14 @@ def main_worker(gpu, ngpus_per_node, args):
                 # sup_train_sampler.set_epoch(epoch)
             
             train_avg_sim, train_acc1, train_acc5, train_loss = train(train_loader, models_ensemble, criterion, 
-                                optimizer, scaler, model_ema, mixupcutmix, epoch, args, coeff, args.kl_coeff)
-            if args.no_scheduler:
+                                optimizer, scaler, model_ema, epoch, args, coeff, args.kl_coeff)
+            if not args.no_scheduler:
                 lr_scheduler.step()
             test_acc1, test_acc5, val_loss, val_avg_sim = evaluate(val_loader, models_ensemble, criterion, epoch, args)
-            if args.model_ema:
-                print(" ----------- EMA Testing ------------")
-                test_acc1_ema, test_acc5_ema, val_loss_ema, val_avg_sim_ema = evaluate(val_loader, model_ema, criterion, epoch, args)
-                print("Test Accuracies of all backbones with EMA", test_acc1_ema, test_acc5_ema)
 
-            print("Training Accuracies of all backbones", train_acc1, train_acc5)
-            print("Test Accuracies of all backbones", test_acc1, test_acc5)
-            
+            print("-------------------------Epoch--------------------------", epoch)
+            print("Training Accuracies of all backbones", train_acc1)
+            print("Test Accuracies of all backbones", test_acc1)
             print("Train sim", train_avg_sim)
             print("Val sim", val_avg_sim, coeff)
 
@@ -543,7 +429,7 @@ def main_worker(gpu, ngpus_per_node, args):
                         'optimizer' : optimizer.state_dict(),
                         "lr_scheduler": lr_scheduler.state_dict(),
                         'scaler': scaler.state_dict(),
-                        # 'model_ema': model_ema.state_dict(),
+                        'model_ema': model_ema.state_dict() if args.model_ema else None,
                     }, is_best=False, filename=os.path.join(args.output_dir, fname))
 
 

@@ -12,8 +12,10 @@ from typing import Tuple
 from torch import Tensor
 from torchvision.transforms import functional as FT
 import wandb
+import random
+import itertools
 
-def train(train_loader, models_ensemble, criterion, optimizer, scaler, model_ema, mixupcutmix, epoch, args, coeff, kl_coeff):
+def train(train_loader, models_ensemble, criterion, optimizer, scaler, model_ema, epoch, args, coeff, kl_coeff):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     learning_rates = AverageMeter('LR', ':.4e')
@@ -30,53 +32,34 @@ def train(train_loader, models_ensemble, criterion, optimizer, scaler, model_ema
     models_ensemble.train()
     end = time.time()
     avg_sim = 0.0
-
-    if args.model_type == "adapters":
-        avg_sim = torch.zeros((args.num_adapters, args.num_augs))
-        iter_adapts = np.zeros(args.num_adapters)
-
-    iters_per_epoch = len(train_loader)
-    acc1_list, acc5_list = np.zeros(args.num_encoders), np.zeros(args.num_encoders)
-
-    iters_per_epoch = len(train_loader)
-    
+    acc1_list, acc5_list = np.zeros(args.ensemble_size), np.zeros(args.ensemble_size)
     kl_loss = torch.nn.KLDivLoss(reduction = "batchmean")
+
     for iter, data in enumerate(train_loader):
         images, labels = data[0], data[1]
-        # sup_images, sup_labels = data[1][0], data[1][1]
         data_time.update(time.time() - end)
         learning_rates.update(optimizer.param_groups[0]['lr'])
         if args.gpu is not None:
             # Size of images is args.batch_size * (args.num_augs + 1)
             images = images.reshape(-1, 3, datasets.img_size, datasets.img_size).cuda(args.gpu, non_blocking=True) 
             labels = labels.cuda(args.gpu, non_blocking=True)
-            # sup_images = sup_images.cuda(args.gpu, non_blocking=True)
-            # sup_labels = sup_labels.cuda(args.gpu, non_blocking=True)
 
         images = get_aug_wise_images(images, args)
-        # sup_images, sup_labels = mixupcutmix(sup_images, sup_labels)
 
         with torch.cuda.amp.autocast(False):
             logits, feats = models_ensemble(images)
             # Last 'batch_size' number of images are unaugmented, there are (num_augs+1)*args.batch_size number of images in one batch
-            # orig_image_logits, _ = models_ensemble(sup_images)
             orig_image_logits = logits[:, args.batch_size*args.num_augs:, :]
 
-            # orig image logits and feats is of shape -  [args.num_encoders+1, .....], where last element corresponds to output of baseline model which is frozen
+            # orig image logits and feats is of shape -  [args.ensemble_size+1, .....], where last element corresponds to output of baseline model which is frozen
             ce_loss = get_loss(criterion, orig_image_logits[:-1], labels)
             # Adding KL divergence loss between baseline and models_ensemble predictions
             kl_div = get_kl_loss(orig_image_logits[:-1], orig_image_logits[-1], kl_loss,  T=6, alpha=args.kl_coeff)
-
             similarity_matrix = get_similarity_vector(feats[:-1], args)
             diff = get_pairwise_rowdiff(similarity_matrix).sum()
             loss =  (1 - kl_coeff) * ce_loss + coeff * diff + kl_div
 
-            if args.model_type == "branched":
-                avg_sim += similarity_matrix.cpu().detach()
-            else:
-                selected_ids = models_ensemble.select_adapter_idx
-                avg_sim[selected_ids[:-1]] += similarity_matrix.cpu().detach()
-                iter_adapts[selected_ids[:-1]] += 1
+            avg_sim += similarity_matrix.cpu().detach()
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -91,7 +74,7 @@ def train(train_loader, models_ensemble, criterion, optimizer, scaler, model_ema
         
 
         acc1, acc5 = [], []
-        for i in range(0, args.num_encoders):
+        for i in range(0, args.ensemble_size):
             a1, a5 = accuracy(orig_image_logits[i], labels, topk=(1, 5))
             acc1.append(a1.item())
             acc5.append(a5.item())
@@ -100,7 +83,7 @@ def train(train_loader, models_ensemble, criterion, optimizer, scaler, model_ema
         acc1 = np.mean(acc1)
         acc5 = np.mean(acc5)
 
-        wandb.log({"acc": acc1, "ce loss": ce_loss, "diff": diff})
+        wandb.log({"Mean acc": acc1, "Mean ce loss": ce_loss, "Mean diff": diff})
         ce_losses.update(ce_loss.item(), images.size(0)//(args.num_augs+1))
         variance.update(diff.item(), images.size(0)//(args.num_augs+1))
         kl.update(kl_div.item(), images.size(0)//(args.num_augs+1))
@@ -112,19 +95,10 @@ def train(train_loader, models_ensemble, criterion, optimizer, scaler, model_ema
         # torch.cuda.empty_cache()
         if iter % args.print_freq == 0:
             progress.display(iter)
-            if args.model_type == "adapters":
-                print("Models selected", models_ensemble.select_adapter_idx)
-                for j in range(args.num_adapters):
-                    print(avg_sim[j]/(iter_adapts[j]))
 
     acc1_list /= (iter)
     acc5_list /= (iter)
-    if args.model_type == "branched":
-        avg_sim /= (iter)
-    else:
-        for k in range(args.num_adapters):
-            avg_sim[k] /= (iter_adapts[k])
-
+    avg_sim /= (iter)
     torch.cuda.empty_cache()
    
     return avg_sim, acc1_list, acc5_list, ce_losses.avg
@@ -150,9 +124,8 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
 
     models_ensemble.eval()
     end = time.time()
-    avg_sim = 0.0
 
-    acc1_list, acc5_list = np.zeros(args.num_encoders), np.zeros(args.num_encoders)
+    acc1_list, acc5_list = np.zeros(args.ensemble_size), np.zeros(args.ensemble_size)
     orig_feats_list = []
     all_feats_list = [[] for _ in range(args.num_augs)]
     for iter, (images, labels) in enumerate(val_loader):
@@ -164,10 +137,8 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
         images = get_aug_wise_images(images, args)
         with torch.no_grad():
             with torch.cuda.amp.autocast(False):
-                if args.model_type == "branched":
-                    logits, feats = models_ensemble(images) # Pass the un-augmented image
-                else:
-                    logits, feats = models_ensemble(images, select=False)
+                logits, feats = models_ensemble(images) # Pass the un-augmented image
+
                 # Last 'batch_size' images are unaugmented, there are (num_augs+1)*args.batch_size number of images in one batch
                 orig_image_logits = logits[:, args.batch_size * args.num_augs:, :]
                 orig_image_feats = feats[:, args.batch_size * args.num_augs:, :]
@@ -177,7 +148,7 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
                 ce_loss = get_loss(criterion, orig_image_logits, labels)
 
             acc1, acc5 = [], []
-            for i in range(0, args.num_encoders):
+            for i in range(0, args.ensemble_size):
                 a1, a5 = accuracy(orig_image_logits[i], labels, topk=(1, 5))
                 acc1.append(a1.item())
                 acc5.append(a5.item())
@@ -202,11 +173,8 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
     acc1_list /= (iter+1)
     acc5_list /= (iter+1)
     all_orig_feats = torch.cat(orig_feats_list, dim = 1)
-    if args.model_type == "branched":
-        sim = torch.zeros((args.num_encoders + 1, args.num_augs))
-    else:
-        sim = torch.zeros((args.num_adapters, args.num_augs))
-    
+    sim = torch.zeros((args.ensemble_size + 1, args.num_augs))
+
     for i in range(0, args.num_augs):
         all_aug_feats = all_feats_list[i]
         all_aug_feats = torch.cat(all_aug_feats, dim=1)
@@ -215,22 +183,12 @@ def evaluate(val_loader, models_ensemble, criterion, epoch, args):
     wandb.log({"val acc": top1.avg, "ce loss": ce_loss})
     return acc1_list, acc5_list, top1.avg, sim
 
-
-def get_aug_wise_logits(logits, args):
-    logits_list = []
-    for i in range(args.num_augs+1):
-        l = logits[:, i::args.num_augs+1, :]
-        print(l.shape)
-        torchvision.utils.save_image(l, "test_images_aug"+str(i)+ ".png")
-        logits_list.append(logits[:, i::args.num_augs+1])
-    logits_list = torch.cat(logits_list, dim = 1)
-    return logits_list
-
 def adjust_coeff(coeff, epochs, start_coeff, end_coeff = 5.0):
     coeff += (end_coeff - start_coeff)/epochs
     return coeff
 
 def get_aug_wise_images(images, args):
+    # Change the order of the images
     images_list = []
     for i in range(args.num_augs+1):
         l = images[i::args.num_augs+1, :, :, :]
@@ -260,7 +218,7 @@ def get_pairwise_rowdiff(sim_matrix, criterion = torch.nn.L1Loss()):
 
 def get_similarity_vector(feats, args):
     # returns N vectors of R^k, each element being the similarity between original and augmented image
-    sim = torch.zeros((args.num_encoders, args.num_augs)).cuda(args.gpu)
+    sim = torch.zeros((args.ensemble_size, args.num_augs)).cuda(args.gpu)
 
     # Unaugmented images 
     orig_feats = feats[:, args.batch_size * args.num_augs:, :]
@@ -366,180 +324,3 @@ class ExponentialMovingAverage(torch.optim.swa_utils.AveragedModel):
             return decay * avg_model_param + (1 - decay) * model_param
 
         super().__init__(model, device, ema_avg, use_buffers=True)
-
-class RandomMixup(torch.nn.Module):
-    """Randomly apply Mixup to the provided batch and targets.
-    The class implements the data augmentations as described in the paper
-    `"mixup: Beyond Empirical Risk Minimization" <https://arxiv.org/abs/1710.09412>`_.
-
-    Args:
-        num_classes (int): number of classes used for one-hot encoding.
-        p (float): probability of the batch being transformed. Default value is 0.5.
-        alpha (float): hyperparameter of the Beta distribution used for mixup.
-            Default value is 1.0.
-        inplace (bool): boolean to make this transform inplace. Default set to False.
-    """
-
-    def __init__(self, num_classes: int, p: float = 0.5, alpha: float = 1.0, inplace: bool = False) -> None:
-        super().__init__()
-
-        if num_classes < 1:
-            raise ValueError(
-                f"Please provide a valid positive value for the num_classes. Got num_classes={num_classes}"
-            )
-
-        if alpha <= 0:
-            raise ValueError("Alpha param can't be zero.")
-
-        self.num_classes = num_classes
-        self.p = p
-        self.alpha = alpha
-        self.inplace = inplace
-
-    def forward(self, batch: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        Args:
-            batch (Tensor): Float tensor of size (B, C, H, W)
-            target (Tensor): Integer tensor of size (B, )
-
-        Returns:
-            Tensor: Randomly transformed batch.
-        """
-        if batch.ndim != 4:
-            raise ValueError(f"Batch ndim should be 4. Got {batch.ndim}")
-        if target.ndim != 1:
-            raise ValueError(f"Target ndim should be 1. Got {target.ndim}")
-        if not batch.is_floating_point():
-            raise TypeError(f"Batch dtype should be a float tensor. Got {batch.dtype}.")
-        if target.dtype != torch.int64:
-            raise TypeError(f"Target dtype should be torch.int64. Got {target.dtype}")
-
-        if not self.inplace:
-            batch = batch.clone()
-            target = target.clone()
-
-        if target.ndim == 1:
-            target = torch.nn.functional.one_hot(target, num_classes=self.num_classes).to(dtype=batch.dtype)
-
-        if torch.rand(1).item() >= self.p:
-            return batch, target
-
-        # It's faster to roll the batch by one instead of shuffling it to create image pairs
-        batch_rolled = batch.roll(1, 0)
-        target_rolled = target.roll(1, 0)
-
-        # Implemented as on mixup paper, page 3.
-        lambda_param = float(torch._sample_dirichlet(torch.tensor([self.alpha, self.alpha]))[0])
-        batch_rolled.mul_(1.0 - lambda_param)
-        batch.mul_(lambda_param).add_(batch_rolled)
-
-        target_rolled.mul_(1.0 - lambda_param)
-        target.mul_(lambda_param).add_(target_rolled)
-
-        return batch, target
-
-    def __repr__(self) -> str:
-        s = (
-            f"{self.__class__.__name__}("
-            f"num_classes={self.num_classes}"
-            f", p={self.p}"
-            f", alpha={self.alpha}"
-            f", inplace={self.inplace}"
-            f")"
-        )
-        return s
-
-
-class RandomCutmix(torch.nn.Module):
-    """Randomly apply Cutmix to the provided batch and targets.
-    The class implements the data augmentations as described in the paper
-    `"CutMix: Regularization Strategy to Train Strong Classifiers with Localizable Features"
-    <https://arxiv.org/abs/1905.04899>`_.
-
-    Args:
-        num_classes (int): number of classes used for one-hot encoding.
-        p (float): probability of the batch being transformed. Default value is 0.5.
-        alpha (float): hyperparameter of the Beta distribution used for cutmix.
-            Default value is 1.0.
-        inplace (bool): boolean to make this transform inplace. Default set to False.
-    """
-
-    def __init__(self, num_classes: int, p: float = 0.5, alpha: float = 1.0, inplace: bool = False) -> None:
-        super().__init__()
-        if num_classes < 1:
-            raise ValueError("Please provide a valid positive value for the num_classes.")
-        if alpha <= 0:
-            raise ValueError("Alpha param can't be zero.")
-
-        self.num_classes = num_classes
-        self.p = p
-        self.alpha = alpha
-        self.inplace = inplace
-
-    def forward(self, batch: Tensor, target: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        Args:
-            batch (Tensor): Float tensor of size (B, C, H, W)
-            target (Tensor): Integer tensor of size (B, )
-
-        Returns:
-            Tensor: Randomly transformed batch.
-        """
-        if batch.ndim != 4:
-            raise ValueError(f"Batch ndim should be 4. Got {batch.ndim}")
-        if target.ndim != 1:
-            raise ValueError(f"Target ndim should be 1. Got {target.ndim}")
-        if not batch.is_floating_point():
-            raise TypeError(f"Batch dtype should be a float tensor. Got {batch.dtype}.")
-        if target.dtype != torch.int64:
-            raise TypeError(f"Target dtype should be torch.int64. Got {target.dtype}")
-
-        if not self.inplace:
-            batch = batch.clone()
-            target = target.clone()
-
-        if target.ndim == 1:
-            target = torch.nn.functional.one_hot(target, num_classes=self.num_classes).to(dtype=batch.dtype)
-
-        if torch.rand(1).item() >= self.p:
-            return batch, target
-
-        # It's faster to roll the batch by one instead of shuffling it to create image pairs
-        batch_rolled = batch.roll(1, 0)
-        target_rolled = target.roll(1, 0)
-
-        # Implemented as on cutmix paper, page 12 (with minor corrections on typos).
-        lambda_param = float(torch._sample_dirichlet(torch.tensor([self.alpha, self.alpha]))[0])
-        _, H, W = FT.get_dimensions(batch)
-
-        r_x = torch.randint(W, (1,))
-        r_y = torch.randint(H, (1,))
-
-        r = 0.5 * math.sqrt(1.0 - lambda_param)
-        r_w_half = int(r * W)
-        r_h_half = int(r * H)
-
-        x1 = int(torch.clamp(r_x - r_w_half, min=0))
-        y1 = int(torch.clamp(r_y - r_h_half, min=0))
-        x2 = int(torch.clamp(r_x + r_w_half, max=W))
-        y2 = int(torch.clamp(r_y + r_h_half, max=H))
-
-        batch[:, :, y1:y2, x1:x2] = batch_rolled[:, :, y1:y2, x1:x2]
-        lambda_param = float(1.0 - (x2 - x1) * (y2 - y1) / (W * H))
-
-        target_rolled.mul_(1.0 - lambda_param)
-        target.mul_(lambda_param).add_(target_rolled)
-
-        return batch, target
-
-    def __repr__(self) -> str:
-        s = (
-            f"{self.__class__.__name__}("
-            f"num_classes={self.num_classes}"
-            f", p={self.p}"
-            f", alpha={self.alpha}"
-            f", inplace={self.inplace}"
-            f")"
-        )
-        return s
-

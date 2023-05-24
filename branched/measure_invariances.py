@@ -198,12 +198,16 @@ def model_forward(model, x, layer_id):
     x = model.bn1(x)
     x = model.relu(x)
     x = model.maxpool(x)
-    x = model.layer1(x)
-    x = model.layer2(x)
-    layer3_feat = model.layer3(x)
+    layer1_feat = model.layer1(x)
+    layer2_feat = model.layer2(layer1_feat)
+    layer3_feat = model.layer3(layer2_feat)
     layer4_feat = model.layer4(layer3_feat)
     layer4_feat = model.avgpool(layer4_feat)
-    if layer_id == 3:
+    if layer_id == 1:
+        return torch.flatten(layer1_feat, 1)
+    elif layer_id == 2:
+        return torch.flatten(layer2_feat, 1)
+    elif layer_id == 3:
         return torch.flatten(layer3_feat, 1)
     elif layer_id == 4:
         return torch.flatten(layer4_feat, 1)
@@ -226,7 +230,7 @@ def model_forward_qd(model, x, layer_id, qd_id):
 
 def get_similarity_baseline(dataset, clean_dataset, model, args, k):
     layer_avg_similarities = []
-    for layer_id in [3, 4]:
+    for layer_id in [1, 2, 3, 4]:
         np.random.seed(0)
         torch.manual_seed(0)
         sampler = np.random.choice(np.arange(len(dataset)), args.num_images)
@@ -244,6 +248,7 @@ def get_similarity_baseline(dataset, clean_dataset, model, args, k):
             data, clean_data = next(batch_generator)
             clean_feature = model_forward(model, clean_data.to(args.device), layer_id).detach()
             features = model_forward(model, data.to(args.device), layer_id).detach()
+            print(features.shape)
             for j in range(features.shape[0]):
                 S[i, j] = D(clean_feature, features[j, :])
         S = S.mean(dim=0)
@@ -314,6 +319,7 @@ if __name__ == "__main__":
     parser.add_argument('--gpu', default=4, type=int,
                     help='GPU id to use.')
     parser.add_argument('--num_encoders', default=5, type=int, help='Number of encoders')
+    parser.add_argument('--moco', default=None, type=str, help="Use MOCO pretrained model")
 
     args = parser.parse_args()
 
@@ -357,11 +363,15 @@ if __name__ == "__main__":
     print('Average similarity:', layer_avg_similarities)
 
     results = {}
+    if args.moco is not None:
+        args.results_dir = os.path.join(args.results_dir, 'im1k-moco')
     if args.baseline:
         results['transform'] = args.transform
-        results['similarity layer 3'] = layer_avg_similarities[0]
-        results['similarity layer 4'] = layer_avg_similarities[1]
-        fname = os.path.join(args.results_dir, args.transform + '_baseline.json')
+        results['similarity layer 1'] = layer_avg_similarities[0]
+        results['similarity layer 2'] = layer_avg_similarities[1]
+        results['similarity layer 3'] = layer_avg_similarities[2]
+        results['similarity layer 4'] = layer_avg_similarities[3]
+        fname = os.path.join(args.results_dir, args.transform + '_all_layers_baseline.json')
     else:
         results['transform'] = args.transform
         results['similarity layer'] = layer_avg_similarities

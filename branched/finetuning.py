@@ -55,7 +55,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                         ' (default: resnet50)')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
-parser.add_argument('--epochs', default=100, type=int, metavar='N',
+parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -121,6 +121,9 @@ parser.add_argument('--few_shot_reg', default=None, type=float,
                     help='image size')
 parser.add_argument('-sc', '--num-samples-per-classes', default=None, type=int,
                         help='number of samples per classes.')
+parser.add_argument('--test_mode', default='id', type=str, help="Use pretrained or QD model")
+parser.add_argument('--moco', default=None, type=str, help="Use MOCO pretrained model")
+
 
 def main():
     main_worker()
@@ -135,13 +138,17 @@ def main_worker(config=None):
     models_ensemble = load_backbone(args)
     print(models_ensemble)
 
+    models_ensemble.num_classes = dataset_info[args.test_dataset]['num_classes']
     models_ensemble.fc = nn.Linear(2048, dataset_info[args.test_dataset]['num_classes'])
     models_ensemble = models_ensemble.cuda(args.gpu)
     print(models_ensemble)
     for param in models_ensemble.parameters():
         param.requires_grad = True
         
-    train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets_ood(args)
+    if args.test_mode == 'id':
+        train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets(args)
+    elif args.test_mode == 'ood':
+        train_loader, val_loader, trainval_loader, test_loader, num_classes = get_feature_datasets_ood(args)
 
     optimizer = torch.optim.Adam(models_ensemble.parameters(), lr=args.lr,
                                 # momentum=args.momentum,
@@ -189,7 +196,7 @@ def main_worker(config=None):
     print(results)
     print("Best score: ", best_score)
 
-    with open(os.path.join("results", "finetuning", 'results_ft_%s_%s.json'%(args.test_dataset, args.ft_mode)), 'w') as f:
+    with open(os.path.join("results", "moco" if args.moco is not None else "supervised", 'results_ft_%s_%s.json'%(args.test_dataset, args.ft_mode)), 'w') as f:
         json.dump(results, f)
 
 def train(loader, model, device, optimizer, mode, criterion, epoch, args, train_mode):

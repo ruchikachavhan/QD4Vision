@@ -2,11 +2,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 num_augs = 5
-data_name = "imagenet"
+data_name = "imagenet1k"
 
 # inv  = np.load(data_name+"_similarity_matrix_" + str(num_augs) + "augs.npy")
-inv = np.load("val_imagenet1k_similarity_matrix_5_KL_augs.npy")
-
+# inv = np.load("../val_imagenet1k_similarity_matrix_5_KL_adapters_augs.npy")
+inv = np.load("../moco/similarity.npy")
+# inv = np.array([0.3729, 0.9151, 0.4714, 0.3308, 0.9781], 
+#                [0.8228, 0.9497, 0.8767, 0.8881, 0.9891],
+#                [0.7876, 0.9357, 0.3748, 0.5791, 0.9798], 
+#                [0.8091, 0.9417, 0.7])
 print(inv)
 x_tick_names = ['Resized Crop', 'Color Jitter', 'Grayscale', 'Gaussian Blur', 'H-Flip']
 if num_augs == 5:
@@ -33,4 +37,4 @@ ax.set_title("Invariances learned by the ensemble", fontsize=20)
 ax.set_xticks(index+bar_width*2)
 ax.set_xticklabels(str_x_ticks, fontsize=15)
 plt.legend(loc='upper right')
-plt.savefig("unnormalized" + str(num_augs) + "_kl_augs_invariances.png")
+plt.savefig("unnormalized" + str(num_augs) + "_moco_kl_augs_invariances.png")

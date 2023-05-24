@@ -115,8 +115,8 @@ class ResNet(nn.Module):
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(Bottleneck, 64, layers[0])
-        self.layer2 = self._make_layer(Bottleneck, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -278,8 +278,8 @@ class TSA_ResNet(ResNet):
         )
         pretrained_model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         self.load_state_dict(pretrained_model.state_dict())
-        # for layer in [self.layer1, self.layer2, self.layer3, self.layer4]:
-        for layer in [self.layer3, self.layer4]:
+        for layer in [self.layer1, self.layer2, self.layer3, self.layer4]:
+            # for layer in [self.layer2, self.layer3]:
             for block in layer:
                 for name, m in block.named_children():
                     if isinstance(m, nn.Conv2d) and m.kernel_size[0] == 3:
@@ -290,40 +290,44 @@ class TSA_ResNet(ResNet):
         self.sampled_adapters = sampled_adapters
         self.branches_fc = nn.ModuleList()
         for k in range(self.num_adapters):
-            if k != self.num_adapters -1:
-                self.branches_fc.append(nn.Linear(2048, 1000))
-            else:
-                self.branches_fc.append(pretrained_model.fc)
+            if k != self.num_adapters:
+                self.branches_fc.append(nn.Linear(2048, num_classes))
+            # else:
+            #     self.branches_fc.append(pretrained_model.fc)
 
         del pretrained_model, self.fc
+        self.adaper_idxs = [k for k in range(self.num_adapters)] 
 
         self.reset()
 
-    def forward(self, input, select = True):
+    def forward(self, input, select = True, reshape = True, train_mode = True):
         # For every forward pass, we select which adapters to use
         outputs = []
         features = []
-        self.adaper_idxs = [k for k in range(self.num_adapters)] 
-        if select:
-            # Randomly select two adapters to use
-            self.select_adapter_idx = random.sample(self.adaper_idxs, self.sampled_adapters)
-            self.select_adapter_idx.append(None)
-        else:
-            self.select_adapter_idx = self.adaper_idxs
-        # disable_grad of all other adapters and backbone
-        self.enable_adapter_grads()
-        # Add None for baseline, id adapter ids are Nonce, then we use baseline
         
+        if select:
+            self.select_adapter_idx = self.adaper_idxs
+
+        # disable_grad of all other adapters and backbone
+        if train_mode:
+            self.enable_adapter_grads()
+        else:
+            self.disable_all_grads()
+
+        for name, param in self.named_parameters():
+            if 'alpha' not in name and 'fc' not in name:
+                assert param.requires_grad == False
+
         for k in self.select_adapter_idx:
             x = self.conv1(input)
             x = self.bn1(x)
             x = self.relu(x)
             x = self.maxpool(x)
             # send only one input as a list to each layer because nn.Sequential does not support multiple inputs
-            x1= self.layer1(x)
-            x2 = self.layer2(x1)
+            x1, _= self.layer1([x, k])
+            x2, _ = self.layer2([x1, k])
             x3, _ = self.layer3([x2, k])
-            x4, _ = self.layer4([x3, k])
+            x4, _= self.layer4([x3, k])
             feats = self.avgpool(x4)
             feats = torch.flatten(feats, 1)
             features.append(feats)
@@ -333,8 +337,9 @@ class TSA_ResNet(ResNet):
                 out = self.branches_fc[-1](feats)
             outputs.append(out)
         
-        outputs = torch.stack(outputs, dim=0) #(num_adapters, bs, num_classes)
-        features = torch.stack(features, dim=0) #(num_adapters, bs, 2048)
+        if reshape:
+            outputs = torch.stack(outputs, dim=0) #(num_adapters, bs, num_classes)
+            features = torch.stack(features, dim=0) #(num_adapters, bs, 2048)
         return outputs, features
     
     def disable_all_grads(self):

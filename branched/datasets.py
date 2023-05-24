@@ -78,6 +78,7 @@ dorsal_augmentations = [
     transforms.ToTensor(),
     normalize
 ]
+
 tta_augmentations = [
     transforms.RandomResizedCrop((img_size, img_size)),
     transforms.RandomHorizontalFlip(p=1.0),
@@ -130,50 +131,3 @@ class CropsTransform:
             outputs.append(t(x))
         outputs = torch.cat(outputs, dim = 0).reshape(len(self.augs_list), 3, img_size, img_size)
         return outputs
-
-
-# import os
-# import pathlib
-
-# import torch
-# from PIL import Image
-
-
-# class ImageDataset(torch.utils.data.Dataset):
-#     def __init__(self, root: str, folder: str, klass: int, extension: str = "JPEG"):
-#         self._data = pathlib.Path(root) / folder
-#         self.klass = klass
-#         self.extension = extension
-#         # Only calculate once how many files are in this folder
-#         # Could be passed as argument if you precalculate it somehow
-#         # e.g. ls | wc -l on Linux
-#         self._length = sum(1 for entry in os.listdir(self._data))
-
-#     def __len__(self):
-#         # No need to recalculate this value every time
-#         return self._length
-
-#     def __getitem__(self, index):
-#         # images always follow [0, n-1], so you access them directly
-#         return Image.open(self._data / "{}.{}".format(str(index), self.extension))
-
-# root = "/disk/vico02/data2/ilsvrc-data/train"
-# print(os.listdir(os.path.join(root, 'train')))
-# class_folders = sorted(os.listdir(root))
-# all_class_datasets = []
-
-# for f in range(0 ,len(class_folders)):
-#     all_class_datasets += ImageDataset(root, class_folders[f], f)
-
-    # dataset = (
-    #     ImageDataset(root, "n01685808", 0)
-    #     + ImageDataset(root, "n03141823", 1)
-    #     + ImageDataset(root, "n02104365", 2)
-    # )
-
-# print(all_class_datasets)
-# dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
-# print(dataloader)
-
-# for iter, (images, labels) in enumerate(dataloader):
-#     print(images, labels)
